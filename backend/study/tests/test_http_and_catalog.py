@@ -56,16 +56,21 @@ class HttpTests(unittest.TestCase):
 
 
 class CatalogTests(unittest.TestCase):
-    def test_discovery_retains_only_first_two_links(self) -> None:
+    def test_discovery_selects_course_links_and_deduplicates_domains(self) -> None:
         html = """
         <div class="list set_index5" data-num="1">
-          <a href="https://first.example/path">First</a>
-          <a href="//second.example/path">Second</a>
-          <a href="https://third.example">Third</a>
+          <a href="https://news.example"><div><h3>通知公告</h3></div></a>
+          <a href="https://first.example/path"><div><h3>在线课程测评考试平台</h3></div></a>
+          <a href="//second.example/path"><div><h3>劳动课程测评考试平台</h3></div></a>
+          <a href="https://other.example"><div><h3>数字图书馆</h3></div></a>
+          <a href="https://third.example"><div><h3>公益课程平台</h3></div></a>
+          <a href="https://first.example/other"><div><h3>其他课程</h3></div></a>
+          <a href="https://plain.example">课程</a>
+          <a><div><h3>课程</h3></div></a>
         </div>
         """
         with StudyClient("https://www.canvard.net.cn", transport=httpx.MockTransport(lambda request: httpx.Response(200, text=html))) as client:
-            self.assertEqual(discover_domains(client), ["first.example", "second.example"])
+            self.assertEqual(discover_domains(client), ["first.example", "second.example", "third.example"])
 
     def test_all_course_and_video_pages_without_fetching_page_one_twice(self) -> None:
         seen = Counter()

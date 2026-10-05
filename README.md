@@ -2,8 +2,9 @@
 
 `backend/api` accepts account credentials at `POST /start` and publishes
 `study.start` to Redis through Celery. It returns an empty `202 Accepted` response.
-`backend/study` discovers the first two learning domains and publishes one
-`study.run_domain` task per domain. Each domain task uses one HTTPX client for
+`backend/study` discovers learning domains from links with an `h3` title containing
+`课程`, deduplicates them in page order, and publishes one `study.run_domain` task
+per domain. Each domain task uses one HTTPX client for
 captcha recognition, login, course/video discovery, online heartbeats and progress
 submission. Only the API exposes HTTP; study runs as a Celery worker.
 

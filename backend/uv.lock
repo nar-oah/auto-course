@@ -730,7 +730,7 @@ wheels = [
 [[package]]
 name = "study"
 version = "0.1.0"
-source = { virtual = "study" }
+source = { editable = "study" }
 dependencies = [
     { name = "auto-course-contracts" },
     { name = "beautifulsoup4" },

@@ -1,0 +1,113 @@
+name: tauri-android-release
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: Release tag (for example, v0.1.0)
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag (for example, v0.1.0)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: tauri-android-release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build-android
+    runs-on: ubuntu-latest
+    env:
+      NDK_VERSION: 30.0.16248370
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: pnpm/action-setup@v6.1.0
+        with:
+          package_json_file: frontend/package.json
+
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: lts/*
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - uses: actions/setup-java@v6.0.1
+        with:
+          distribution: temurin
+          java-version: "17"
+          check-latest: true
+          cache: gradle
+          cache-dependency-path: frontend/desktop/src-tauri/gen/android/**/*.gradle*
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4.0.4
+
+      - name: Install Android NDK
+        # Gradle installs the SDK platform and build tools required by the generated project.
+        run: sdkmanager "ndk;${NDK_VERSION}"
+
+      - name: Export Android NDK path
+        run: echo "NDK_HOME=${ANDROID_HOME}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Install Rust stable with Android targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      - name: Cache Rust builds
+        uses: swatinem/rust-cache@v2.9.2
+        with:
+          workspaces: frontend/desktop/src-tauri -> target
+          shared-key: android
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: frontend
+
+      - name: Build shared frontend package
+        run: pnpm app:build
+        working-directory: frontend
+
+      - name: Set up Android signing
+        env:
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_BASE64: ${{ secrets.ANDROID_KEY_BASE64 }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          test -n "$ANDROID_KEY_ALIAS"
+          test -n "$ANDROID_KEY_BASE64"
+          test -n "$ANDROID_KEY_PASSWORD"
+          umask 077
+          KEYSTORE_FILE="$RUNNER_TEMP/auto-course-upload-keystore.p12"
+          printf '%s' "$ANDROID_KEY_BASE64" | base64 --decode > "$KEYSTORE_FILE"
+          {
+            printf 'keyAlias=%s\n' "$ANDROID_KEY_ALIAS"
+            printf 'password=%s\n' "$ANDROID_KEY_PASSWORD"
+            printf 'storeFile=%s\n' "$KEYSTORE_FILE"
+          } > frontend/desktop/src-tauri/gen/android/keystore.properties
+
+      - name: Build and upload Android APK
+        uses: tauri-apps/tauri-action@action-v1.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: frontend/desktop
+          tauriScript: pnpm exec tauri
+          mobile: android
+          tagName: ${{ inputs.tag }}
+          releaseName: ${{ inputs.tag }}
+          releaseBody: Release for ${{ inputs.tag }}.
+          releaseDraft: false
+          prerelease: false
+          retryAttempts: 3
+          args: --apk --split-per-abi

@@ -1,0 +1,8 @@
+packages:
+  - "web"
+  - "desktop"
+  - "app"
+allowBuilds:
+  esbuild: true
+  sharp: true
+  workerd: true

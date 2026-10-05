@@ -1,0 +1,25 @@
+services:
+  api:
+    image: ghcr.io/nar-oah/auto-course/api:latest
+    container_name: auto-course-api
+    restart: always
+    networks:
+      - traefik
+      - backend
+    env_file:
+      - .env
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.auto-course.rule=Host(`aws.naroah.top`) && PathPrefix(`/auto-course`)"
+      - "traefik.http.routers.auto-course.entrypoints=websecure"
+      - "traefik.http.routers.auto-course.tls.certresolver=letsencrypt"
+      - "traefik.http.services.auto-course.loadbalancer.server.port=8000"
+      - "traefik.http.middlewares.auto-course-strip.stripprefix.prefixes=/auto-course"
+      - "traefik.http.routers.auto-course.middlewares=auto-course-strip"
+
+networks:
+  traefik:
+    external: true
+
+  backend:
+    external: true

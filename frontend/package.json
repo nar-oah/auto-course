@@ -1,0 +1,20 @@
+{
+  "name": "auto-course-frontend",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "api:generate": "openapi-typescript https://aws.naroah.top/auto-course/openapi.json -o app/src/lib/api/schema.d.ts",
+    "app:build": "pnpm --filter @auto-course/app prepack",
+    "dev:web": "pnpm app:build && pnpm --filter @auto-course/web dev",
+    "dev:desktop": "pnpm app:build && pnpm --filter @auto-course/desktop tauri dev",
+    "build:web": "pnpm app:build && pnpm --filter @auto-course/web build",
+    "build:desktop": "pnpm app:build && pnpm --filter @auto-course/desktop tauri build",
+    "check": "pnpm -r check"
+  },
+  "packageManager": "pnpm@12.9.0",
+  "devDependencies": {
+    "@unocss/extractor-svelte": "^66.10.5",
+    "openapi-typescript": "^7.13.0",
+    "unocss": "^66.10.5"
+  }
+}

@@ -1,0 +1,69 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build outputs
+dist/
+build/
+.svelte-kit/
+.output/
+.vercel/
+.netlify/
+.wrangler/
+.turbo/
+
+# SvelteKit
+.env
+.env.*
+!.env.example
+!.env.local.example
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+
+# TypeScript
+*.tsbuildinfo
+
+# Testing / Coverage
+coverage/
+playwright-report/
+test-results/
+
+# Rust / Cargo
+target/
+Cargo.lock
+
+# Tauri
+src-tauri/target/
+src-tauri/gen/
+src-tauri/.tauri/
+
+# Tauri build artifacts
+*.dmg
+*.AppImage
+*.msi
+*.deb
+*.rpm
+*.exe
+
+# Cloudflare / Wrangler
+.dev.vars
+.wrangler/
+
+# Local cache
+.cache/
+.temp/
+tmp/
+__pycache__/
+*.py[cod]

@@ -14,4 +14,4 @@ COPY --from=builder /app/study /app/study
 ENV PATH="/app/.venv/bin:$PATH"
 WORKDIR /app/study
 
-CMD ["celery", "-A", "main:celery_app", "worker", "-Q", "study", "--loglevel=info"]
+CMD ["celery", "-A", "auto_course_study.tasks:app", "worker", "-Q", "study", "--loglevel=info"]

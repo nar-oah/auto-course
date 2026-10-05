@@ -17,6 +17,16 @@ services:
       - "traefik.http.middlewares.auto-course-strip.stripprefix.prefixes=/auto-course"
       - "traefik.http.routers.auto-course.middlewares=auto-course-strip"
 
+  study:
+    image: ghcr.io/nar-oah/auto-course/study:latest
+    container_name: auto-course-study
+    restart: unless-stopped
+    networks:
+      - backend
+    env_file:
+      - .env
+
+
 networks:
   traefik:
     external: true

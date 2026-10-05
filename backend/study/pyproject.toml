@@ -1,12 +1,13 @@
 [project]
-name = "api"
+name = "study"
 version = "0.1.0"
 requires-python = ">=3.14"
 dependencies = [
     "auto-course-contracts",
+    "beautifulsoup4>=4.15.0",
     "celery[redis]>=5.6.3",
-    "fastapi>=0.142.2",
-    "uvicorn[standard]>=0.54.0",
+    "ddddocr>=1.6.1",
+    "httpx>=0.28.1",
 ]
 
 [tool.uv.sources]
@@ -17,4 +18,4 @@ requires = ["uv_build>=0.12.17,<0.13.0"]
 build-backend = "uv_build"
 
 [tool.uv.build-backend]
-module-name = "auto_course_api"
+module-name = "auto_course_study"

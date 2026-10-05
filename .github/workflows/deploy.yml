@@ -28,6 +28,7 @@ jobs:
       matrix:
         service:
           - api
+          - study
 
     steps:
       - name: Checkout

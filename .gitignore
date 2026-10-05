@@ -67,3 +67,5 @@ src-tauri/.tauri/
 tmp/
 __pycache__/
 *.py[cod]
+.venv/
+.pytest_cache/

@@ -94,9 +94,6 @@ class StudyClient:
                 self.sleep(delay)
         return None
 
-    def mod_referer(self, node_id: str) -> None:
-        self.client.headers["Referer"] = f"{self.base_url}/user/node?nodeId={node_id}"
-
     def get_captcha(self, local: str) -> httpx.Response | None:
         return self.request("GET", local, headers={"Accept": "image/webp,*/*"})
 

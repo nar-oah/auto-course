@@ -62,7 +62,7 @@ class VideoList:
                 for item in self._get_video_items(course):
                     try:
                         progress = float(item.get("progress", 1))
-                        if progress >= self.threshold:
+                        if not progress < self.threshold:
                             continue
                         total = self._get_seconds(item.get("videoDuration", "00:00:00"))
                         watched = int(item.get("duration", 0))

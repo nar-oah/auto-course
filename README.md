@@ -54,11 +54,14 @@ component memory, and a successful submission displays only a receipt message.
 cd frontend
 pnpm install
 pnpm api:generate
-pnpm app:build
-pnpm check
 pnpm build:web
+pnpm check
 pnpm --filter @auto-course/desktop build
 ```
+
+Build Web before running the workspace check on a fresh checkout: Wrangler's
+generated types include the built Worker entry point. `build:web` also builds the
+shared App package.
 
 The production generator reads
 `https://aws.naroah.top/auto-course/openapi.json`, and the client calls

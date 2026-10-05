@@ -16,15 +16,15 @@ def discover_domains(client: StudyClient | None = None) -> list[str]:
     if response is None:
         return []
     soup = BeautifulSoup(response.text, "html.parser")
-    listing = soup.select_one('div.list.set_index5[data-num="1"]')
-    if listing is None:
-        return []
     domains = []
-    for link in listing.select("a[href]")[:2]:
+    for link in soup.select("a[href]"):
+        title = link.find("h3")
+        if title is None or "课程" not in title.get_text(strip=True):
+            continue
         href = link.get("href")
         if not isinstance(href, str):
             continue
         domain = urlparse(urljoin(DISCOVERY_URL, href)).netloc
         if domain:
             domains.append(domain)
-    return domains
+    return list(dict.fromkeys(domains))

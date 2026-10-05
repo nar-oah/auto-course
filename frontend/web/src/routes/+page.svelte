@@ -2,4 +2,4 @@
 	import { App } from '@auto-course/app';
 </script>
 
-<App />
+<App fetch={globalThis.fetch} />

@@ -1,2 +1,3 @@
-def hello() -> str:
-    return "Hello from auto-course-contracts!"
+from .credentials import Credentials
+
+__all__ = ["Credentials"]

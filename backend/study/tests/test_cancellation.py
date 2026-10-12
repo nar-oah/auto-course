@@ -9,7 +9,7 @@ from auto_course_contracts.cancellation import STOP_KEY_PREFIX
 from auto_course_study.bot import CourseBot
 from auto_course_study.cancellation import StudyStopped, TaskCancellation
 from auto_course_study.http import StudyClient
-from auto_course_study.models import Video
+from auto_course_study.models import Course, Video
 
 
 def test_task_stop_interrupts_sleep_and_removes_its_signal():
@@ -47,7 +47,7 @@ def test_stop_during_progress_joins_heartbeat():
     bot = CourseBot(client, Credentials(username="student", password="secret"), sleep=Mock(side_effect=StudyStopped))
     with patch("auto_course_study.bot.threading.Thread") as thread:
         with pytest.raises(StudyStopped):
-            bot.update_study_progress(Video(id="video", total_duration=120, watched_duration=0))
+            bot.update_study_progress(Video("Video", "video", Course("course", "Course"), 120, 0, 0))
     thread.return_value.start.assert_called_once_with()
     thread.return_value.join.assert_called_once_with()
     assert thread.call_args.kwargs["args"][0].is_set()

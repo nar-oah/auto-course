@@ -5,7 +5,8 @@ from auto_course_contracts import Credentials
 from celery import Celery
 
 from .bot import CourseBot
-from .discovery import discover_domains
+from .cancellation import StudyStopped, TaskCancellation
+from .discovery import DISCOVERY_URL, discover_domains
 from .http import StudyClient
 
 
@@ -24,16 +25,31 @@ app.conf.update(
 @app.task(name="study.start", ignore_result=True)
 def start(credentials: dict[str, Any]) -> None:
     validated = Credentials.model_validate(credentials).model_dump(mode="json")
-    for domain in discover_domains():
-        run_domain.apply_async(
-            args=[domain, validated],
-            queue="study",
-            argsrepr=f"({domain!r}, <credentials>)",
-        )
+    with TaskCancellation(start.request.id, app.conf.broker_url) as cancellation:
+        try:
+            with StudyClient(
+                DISCOVERY_URL, sleep=cancellation.sleep, check=cancellation.check
+            ) as client:
+                domains = discover_domains(client)
+            for domain in domains:
+                cancellation.check()
+                run_domain.apply_async(
+                    args=[domain, validated],
+                    queue="study",
+                    argsrepr=f"({domain!r}, <credentials>)",
+                )
+        except StudyStopped:
+            return
 
 
 @app.task(name="study.run_domain", ignore_result=True)
 def run_domain(domain: str, credentials: dict[str, Any]) -> None:
     validated = Credentials.model_validate(credentials)
-    with StudyClient(f"https://{domain}") as client:
-        CourseBot(client, validated).run()
+    with TaskCancellation(run_domain.request.id, app.conf.broker_url) as cancellation:
+        try:
+            with StudyClient(
+                f"https://{domain}", sleep=cancellation.sleep, check=cancellation.check
+            ) as client:
+                CourseBot(client, validated, sleep=cancellation.sleep).run()
+        except StudyStopped:
+            return

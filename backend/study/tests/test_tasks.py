@@ -4,6 +4,7 @@ from unittest.mock import Mock, patch
 from pydantic import ValidationError
 
 from auto_course_study import tasks
+from auto_course_study.cancellation import StudyStopped
 
 
 CREDENTIALS = {"username": "student", "password": "password"}
@@ -27,11 +28,34 @@ class TaskTests(unittest.TestCase):
         context.__exit__ = Mock(return_value=False)
         with patch.object(tasks, "StudyClient", return_value=context) as constructor, patch.object(tasks, "CourseBot") as bot:
             tasks.run_domain.run("one.example", CREDENTIALS)
-        constructor.assert_called_once_with("https://one.example")
+        self.assertEqual(constructor.call_args.args, ("https://one.example",))
+        self.assertTrue(callable(constructor.call_args.kwargs["check"]))
+        self.assertTrue(callable(constructor.call_args.kwargs["sleep"]))
         self.assertIs(bot.call_args.args[0], client)
         self.assertEqual(bot.call_args.args[1].model_dump(), CREDENTIALS)
         bot.return_value.run.assert_called_once_with()
         context.__exit__.assert_called_once_with(None, None, None)
+
+    def test_stopped_domain_closes_client_and_returns_without_error(self) -> None:
+        client = Mock()
+        context = Mock()
+        context.__enter__ = Mock(return_value=client)
+        context.__exit__ = Mock(return_value=False)
+        with patch.object(tasks, "StudyClient", return_value=context), patch.object(tasks, "CourseBot") as bot:
+            bot.return_value.run.side_effect = StudyStopped
+            self.assertIsNone(tasks.run_domain.run("one.example", CREDENTIALS))
+        self.assertIs(context.__exit__.call_args.args[0], StudyStopped)
+
+    def test_stop_during_discovery_does_not_enqueue_domains(self) -> None:
+        with patch.object(tasks, "discover_domains", side_effect=StudyStopped), patch.object(tasks.run_domain, "apply_async") as enqueue:
+            self.assertIsNone(tasks.start.run(CREDENTIALS))
+        enqueue.assert_not_called()
+
+    def test_stop_during_fanout_does_not_enqueue_remaining_domains(self) -> None:
+        with patch.object(tasks, "TaskCancellation") as cancellation, patch.object(tasks, "discover_domains", return_value=["one.example", "two.example"]), patch.object(tasks.run_domain, "apply_async") as enqueue:
+            cancellation.return_value.__enter__.return_value.check.side_effect = [None, StudyStopped]
+            self.assertIsNone(tasks.start.run(CREDENTIALS))
+        self.assertEqual(enqueue.call_count, 1)
 
     def test_task_credentials_are_validated_before_discovery(self) -> None:
         with patch.object(tasks, "discover_domains") as discover:

@@ -1,3 +1,3 @@
-from .credentials import Credentials
+from .credentials import Credentials, StopRequest
 
-__all__ = ["Credentials"]
+__all__ = ["Credentials", "StopRequest"]

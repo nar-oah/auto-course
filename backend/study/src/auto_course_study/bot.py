@@ -7,6 +7,7 @@ from typing import Protocol
 from auto_course_contracts import Credentials
 
 from .catalog import VideoList
+from .cancellation import StudyStopped
 from .http import StudyClient, json_object
 from .models import Config, StudyInfo, Video
 
@@ -55,7 +56,10 @@ class CourseBot:
 
     def _send_online_pings(self, stop: threading.Event) -> None:
         while not stop.is_set():
-            self.client.post_online()
+            try:
+                self.client.post_online()
+            except StudyStopped:
+                return
             stop.wait(self.config.online_interval)
 
     @staticmethod

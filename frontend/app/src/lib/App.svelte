@@ -7,15 +7,18 @@
 	let username = $state('');
 	let password = $state('');
 	let pending = $state(false);
+	let stopping = $state(false);
 	let submitted = $state(false);
+	let stopSubmitted = $state(false);
 	let error = $state('');
 
 	async function submit(event: SubmitEvent) {
 		event.preventDefault();
-		if (pending) return;
+		if (pending || stopping) return;
 
 		pending = true;
 		submitted = false;
+		stopSubmitted = false;
 		error = '';
 
 		try {
@@ -35,12 +38,38 @@
 			pending = false;
 		}
 	}
+
+	async function stop() {
+		if (pending || stopping) return;
+		const accountInput = document.getElementById('username') as HTMLInputElement;
+		if (!accountInput.reportValidity()) return;
+
+		stopping = true;
+		submitted = false;
+		stopSubmitted = false;
+		error = '';
+
+		try {
+			const { response } = await client.POST('/stop', {
+				body: { username }
+			});
+			if (response.status === 204) {
+				stopSubmitted = true;
+			} else {
+				error = '停止请求提交失败，请稍后重试。';
+			}
+		} catch {
+			error = '无法提交停止请求，请检查网络后重试。';
+		} finally {
+			stopping = false;
+		}
+	}
 </script>
 
 <main>
 	<section aria-labelledby="title">
 		<h1 id="title">自动学习</h1>
-		<form method="post" autocomplete="off" onsubmit={submit} aria-busy={pending}>
+		<form method="post" autocomplete="off" onsubmit={submit} aria-busy={pending || stopping}>
 			<label for="username">账号</label>
 			<input
 				id="username"
@@ -51,7 +80,7 @@
 				autocapitalize="none"
 				spellcheck={false}
 				required
-				disabled={pending}
+				disabled={pending || stopping}
 			/>
 
 			<label for="password">密码</label>
@@ -62,14 +91,21 @@
 				bind:value={password}
 				autocomplete="off"
 				required
-				disabled={pending}
+				disabled={pending || stopping}
 			/>
 
-			<button type="submit" disabled={pending}>{pending ? '提交中…' : '提交'}</button>
+			<div class="actions">
+				<button type="submit" disabled={pending || stopping}>{pending ? '提交中…' : '提交'}</button>
+				<button type="button" class="stop" onclick={stop} disabled={pending || stopping}>
+					{stopping ? '提交中…' : '停止'}
+				</button>
+			</div>
 		</form>
 
 		{#if submitted}
 			<p class="success" role="status">请求已经提交。</p>
+		{:else if stopSubmitted}
+			<p class="success" role="status">停止请求已经提交。</p>
 		{:else if error}
 			<p class="error" role="alert">{error}</p>
 		{/if}
@@ -149,6 +185,25 @@
 
 	button:hover:enabled {
 		background: #1d4ed8;
+	}
+
+	.actions {
+		display: flex;
+		gap: 0.75rem;
+	}
+
+	.actions button {
+		flex: 1;
+	}
+
+	.stop {
+		border-color: #cbd3df;
+		background: white;
+		color: inherit;
+	}
+
+	.stop:hover:enabled {
+		background: #f4f6fa;
 	}
 
 	:disabled {

@@ -5,6 +5,7 @@
 	const client = $derived(createApiClient(fetch));
 
 	let username = $state('');
+	let usernameInput: HTMLInputElement;
 	let password = $state('');
 	let pending = $state(false);
 	let stopping = $state(false);
@@ -41,8 +42,7 @@
 
 	async function stop() {
 		if (pending || stopping) return;
-		const accountInput = document.getElementById('username') as HTMLInputElement;
-		if (!accountInput.reportValidity()) return;
+		if (!usernameInput.reportValidity()) return;
 
 		stopping = true;
 		submitted = false;
@@ -76,6 +76,7 @@
 				name="username"
 				type="text"
 				bind:value={username}
+				bind:this={usernameInput}
 				autocomplete="off"
 				autocapitalize="none"
 				spellcheck={false}

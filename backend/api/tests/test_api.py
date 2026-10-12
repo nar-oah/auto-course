@@ -41,11 +41,11 @@ def test_invalid_request_does_not_publish(payload):
     publish.assert_not_called()
 
 
-def test_openapi_contains_only_start_and_shared_credentials():
+def test_openapi_contains_start_stop_and_shared_requests():
     response = client.get("/openapi.json")
     assert response.status_code == 200
     schema = response.json()
-    assert set(schema["paths"]) == {"/start"}
+    assert set(schema["paths"]) == {"/start", "/stop"}
     operation = schema["paths"]["/start"]["post"]
     assert operation["requestBody"]["content"]["application/json"]["schema"] == {
         "$ref": "#/components/schemas/Credentials"
@@ -53,6 +53,27 @@ def test_openapi_contains_only_start_and_shared_credentials():
     assert "content" not in operation["responses"]["202"]
     credentials = schema["components"]["schemas"]["Credentials"]
     assert set(credentials["properties"]) == {"username", "password"}
+    stop = schema["paths"]["/stop"]["post"]
+    assert stop["requestBody"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/StopRequest"
+    }
+    assert "content" not in stop["responses"]["204"]
+    assert set(schema["components"]["schemas"]["StopRequest"]["properties"]) == {"username"}
+
+
+def test_stop_requires_only_username_and_returns_no_task_status():
+    with patch("auto_course_api.main.stop_account") as stop:
+        response = client.post("/stop", json={"username": "student"})
+    assert response.status_code == 204
+    assert response.content == b""
+    stop.assert_called_once_with("student")
+
+
+@pytest.mark.parametrize("payload", [{}, {"username": ""}, {"username": "student", "password": "secret"}])
+def test_invalid_stop_request_does_not_stop_tasks(payload):
+    with patch("auto_course_api.main.stop_account") as stop:
+        assert client.post("/stop", json=payload).status_code == 422
+    stop.assert_not_called()
 
 
 def test_broker_has_no_result_storage_and_password_is_not_in_model_repr():
@@ -62,9 +83,10 @@ def test_broker_has_no_result_storage_and_password_is_not_in_model_repr():
     assert "secret" not in repr(Credentials(username="student", password="secret"))
 
 
-def test_browser_cors_preflight():
+@pytest.mark.parametrize("path", ["/start", "/stop"])
+def test_browser_cors_preflight(path):
     response = client.options(
-        "/start",
+        path,
         headers={
             "Origin": "https://auto-course.example",
             "Access-Control-Request-Method": "POST",

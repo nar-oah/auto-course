@@ -82,7 +82,7 @@ class CourseBot:
         return None
 
     @staticmethod
-    def _progress_data(response: httpx.Response | None) -> dict:
+    def _progress_data(response: httpx.Response | None) -> dict[str, object]:
         if response is None:
             return {}
         if 400 <= response.status_code < 500 and response.status_code != 429:
@@ -144,8 +144,12 @@ class CourseBot:
                 # An unconfirmed final submission must also stop the domain.
                 if study_time >= finish_time:
                     return next_id is not None
-                # Even the first failure or a restored login needs a timed wait.
-                next_time = min(self.config.study_interval, finish_time - study_time)
+                # Preserve the scheduled wait on failure/relogin, as before.
+                # The initial zero wait must never carry into an uncertain retry.
+                if next_id is not None or next_time == 0:
+                    next_time = min(
+                        self.config.study_interval, finish_time - study_time
+                    )
             return False
         finally:
             stop.set()

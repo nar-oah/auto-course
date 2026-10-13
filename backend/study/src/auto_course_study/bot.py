@@ -56,15 +56,16 @@ class CourseBot:
         response = self.client.post_login(
             self.credentials.username, self.credentials.password, code
         )
-        return (
-            response is not None
-            and response.is_success
-            and json_object(response).get("status") is True
-        )
+        if response is None or not response.is_success:
+            return False
+        status = json_object(response).get("status")
+        # Preserve the old login's integer success flag without accepting
+        # arbitrary truthy strings, numbers or containers as authentication.
+        return isinstance(status, (bool, int)) and status == 1
 
     def _send_online_pings(self, stop: threading.Event) -> None:
         while not stop.is_set():
-            self.client.post_online()
+            self.client.post_online(stop=stop)
             stop.wait(self.config.online_interval)
 
     @staticmethod
@@ -74,11 +75,13 @@ class CourseBot:
         study_id = response.get("studyId")
         if isinstance(study_id, bool):
             return None
-        if isinstance(study_id, int) and study_id > 0:
+        if isinstance(study_id, int) and study_id >= 0:
             return study_id
         if isinstance(study_id, str) and study_id.isdecimal():
-            value = int(study_id)
-            return value if value > 0 else None
+            try:
+                return int(study_id)
+            except ValueError:
+                return None
         return None
 
     @staticmethod
@@ -130,7 +133,8 @@ class CourseBot:
             failures = 0
             while study_time < finish_time and failures < self.config.max_failures:
                 self.sleep(next_time)
-                study_time += next_time
+                # Keep the scheduled wait without submitting past the target.
+                study_time = min(study_time + next_time, finish_time)
                 info = StudyInfo(video.id, study_id, study_time)
                 try:
                     next_id = self._submit_progress(info)

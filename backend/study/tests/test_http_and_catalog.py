@@ -1,6 +1,9 @@
 from collections import Counter
+from datetime import datetime, timedelta, timezone
+from email.utils import format_datetime
+from threading import Event
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 from urllib.parse import parse_qs
 
 import httpx
@@ -52,7 +55,7 @@ class HttpTests(unittest.TestCase):
                 sleep.assert_called_once_with(1)
 
     def test_invalid_retry_after_uses_backoff(self) -> None:
-        for retry_after in ("invalid", "nan", "inf"):
+        for retry_after in ("invalid", "nan", "inf", "-inf"):
             with self.subTest(retry_after=retry_after):
                 handler = Mock(return_value=httpx.Response(503, headers={"Retry-After": retry_after}))
                 sleep = Mock()
@@ -60,6 +63,70 @@ class HttpTests(unittest.TestCase):
                     self.assertIsNone(client.post_online())
                 self.assertEqual(handler.call_count, 4)
                 self.assertEqual([call.args[0] for call in sleep.call_args_list], [1, 2, 4])
+
+    def test_excessive_retry_after_stops_without_early_retry_or_long_sleep(self) -> None:
+        for retry_after in ("61", "3600", "1.7976931348623157e308", "Fri, 31 Dec 9999 23:59:59 GMT"):
+            with self.subTest(retry_after=retry_after):
+                handler = Mock(return_value=httpx.Response(429, headers={"Retry-After": retry_after}))
+                sleep = Mock()
+                with StudyClient("https://courses.example", transport=httpx.MockTransport(handler), sleep=sleep) as client:
+                    self.assertIsNone(client.post_online())
+                handler.assert_called_once()
+                sleep.assert_not_called()
+
+    def test_bounded_numeric_and_date_retry_after_preserves_server_delay(self) -> None:
+        now = datetime(2026, 10, 13, tzinfo=timezone.utc)
+        for retry_after, delay in (("3", 3), ("60", 60), (format_datetime(now + timedelta(seconds=30)), 30)):
+            with self.subTest(retry_after=retry_after):
+                handler = Mock(side_effect=[
+                    httpx.Response(429, headers={"Retry-After": retry_after}),
+                    httpx.Response(200),
+                ])
+                sleep = Mock()
+                with patch("auto_course_study.http.datetime") as clock:
+                    clock.now.return_value = now
+                    with StudyClient("https://courses.example", transport=httpx.MockTransport(handler), sleep=sleep) as client:
+                        self.assertEqual(client.post_online().status_code, 200)
+                self.assertEqual(handler.call_count, 2)
+                sleep.assert_called_once_with(delay)
+
+    def test_online_stop_prevents_the_first_request(self) -> None:
+        stop = Event()
+        stop.set()
+        handler = Mock(return_value=httpx.Response(200))
+        sleep = Mock()
+        with StudyClient("https://courses.example", transport=httpx.MockTransport(handler), sleep=sleep) as client:
+            self.assertIsNone(client.post_online(stop=stop))
+        handler.assert_not_called()
+        sleep.assert_not_called()
+
+    def test_online_retry_wait_is_cancelled_without_another_request(self) -> None:
+        stop = Event()
+
+        def cancel(delay: float) -> bool:
+            stop.set()
+            return stop.is_set()
+
+        handler = Mock(return_value=httpx.Response(429, headers={"Retry-After": "60"}))
+        sleep = Mock()
+        with patch.object(stop, "wait", side_effect=cancel) as wait:
+            with StudyClient("https://courses.example", transport=httpx.MockTransport(handler), sleep=sleep) as client:
+                self.assertIsNone(client.post_online(stop=stop))
+        handler.assert_called_once()
+        wait.assert_called_once_with(60)
+        sleep.assert_not_called()
+
+    def test_online_interruptible_wait_keeps_normal_retry_backoff(self) -> None:
+        stop = Mock(spec=Event)
+        stop.is_set.return_value = False
+        stop.wait.return_value = False
+        handler = Mock(return_value=httpx.Response(503))
+        sleep = Mock()
+        with StudyClient("https://courses.example", transport=httpx.MockTransport(handler), sleep=sleep) as client:
+            self.assertIsNone(client.post_online(stop=stop))
+        self.assertEqual(handler.call_count, 4)
+        self.assertEqual([call.args[0] for call in stop.wait.call_args_list], [1, 2, 4])
+        sleep.assert_not_called()
 
     def test_study_posts_once_and_preserves_failure_response(self) -> None:
         info = StudyInfo(video_id="video-1", study_id=42, time=31)

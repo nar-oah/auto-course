@@ -139,6 +139,73 @@ class TaskTests(unittest.TestCase):
         self.assertEqual(cleanup_order, ["heartbeat stopped", "client closed"])
         self.assertTrue(client.client.is_closed)
 
+    def test_http_heartbeat_wait_is_interruptible_before_domain_session_closes(self) -> None:
+        for retry_after, expected_wait in (("3600", 120), ("60", 60), (None, 1)):
+            with self.subTest(retry_after=retry_after):
+                waiting = threading.Event()
+                heartbeats = []
+                online_requests = []
+                study_requests = []
+                waits = []
+                cleanup_order = []
+
+                def handler(request: httpx.Request) -> httpx.Response:
+                    if request.url.path == "/user/online":
+                        online_requests.append(request)
+                        headers = {"Retry-After": retry_after} if retry_after is not None else {}
+                        return httpx.Response(503, headers=headers)
+                    self.assertEqual(request.url.path, "/user/node/study")
+                    self.assertTrue(waiting.wait(timeout=1))
+                    study_requests.append(parse_qs(request.content.decode()))
+                    return httpx.Response(200, json={"status": False})
+
+                bot, client = self.make_domain_bot(handler)
+                client.sleep = Mock()
+                original_online = client.post_online
+                original_heartbeat = bot._send_online_pings
+                original_close = client.client.close
+
+                def online(*, stop: threading.Event) -> httpx.Response | None:
+                    original_wait = stop.wait
+
+                    def wait(timeout: float) -> bool:
+                        waits.append(timeout)
+                        waiting.set()
+                        return original_wait(timeout)
+
+                    stop.wait = Mock(side_effect=wait)
+                    return original_online(stop=stop)
+
+                def heartbeat(stop: threading.Event) -> None:
+                    heartbeats.append((stop, threading.current_thread()))
+                    original_heartbeat(stop)
+                    cleanup_order.append("heartbeat stopped")
+
+                def close() -> None:
+                    stop, thread = heartbeats[0]
+                    self.assertTrue(stop.is_set())
+                    self.assertFalse(thread.is_alive())
+                    cleanup_order.append("client closed")
+                    original_close()
+
+                with (
+                    patch.object(tasks, "StudyClient", return_value=client),
+                    patch.object(tasks, "CourseBot", return_value=bot),
+                    patch.object(bot, "login", return_value=True),
+                    patch.object(bot, "_send_online_pings", side_effect=heartbeat),
+                    patch.object(bot.video_list, "get_videos", return_value=iter([VIDEO, NEXT_VIDEO])),
+                    patch.object(client, "post_online", side_effect=online),
+                    patch.object(client.client, "close", side_effect=close),
+                ):
+                    tasks.run_domain.run("one.example", CREDENTIALS)
+                self.assertEqual(waits[0], expected_wait)
+                self.assertEqual(len(online_requests), 1)
+                self.assertEqual(len(study_requests), 1)
+                self.assertEqual(study_requests[0]["nodeId"], [VIDEO.id])
+                client.sleep.assert_not_called()
+                self.assertEqual(cleanup_order, ["heartbeat stopped", "client closed"])
+                self.assertTrue(client.client.is_closed)
+
     def test_task_credentials_are_validated_before_discovery(self) -> None:
         with patch.object(tasks, "discover_domains") as discover:
             with self.assertRaises(ValidationError):

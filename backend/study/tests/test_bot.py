@@ -246,6 +246,53 @@ class BotTests(unittest.TestCase):
         self.assertEqual(len(submissions), 2)
         self.assertEqual([payload["studyId"] for payload in submissions], [["7"], ["7"]])
 
+    def test_unconfirmed_captcha_resubmission_keeps_study_id_and_waits(self) -> None:
+        clock = VirtualClock()
+        submissions = []
+        responses = iter([
+            {"status": True, "studyId": 7}, {"need_code": 1},
+            {"status": True, "studyId": 0}, {"status": True, "studyId": 9},
+        ])
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/service/code/aa":
+                return httpx.Response(200, content=b"captcha")
+            submissions.append((clock.now, parse_qs(request.content.decode())))
+            return httpx.Response(200, json=next(responses))
+
+        bot, _ = self.make_bot(handler, clock=clock)
+        with patch.object(bot, "_send_online_pings"):
+            self.assertTrue(bot.update_study_progress(VIDEO))
+        self.assertEqual([when for when, _ in submissions], [0, 30, 30, 60])
+        self.assertEqual([payload["studyTime"] for _, payload in submissions], [["1"], ["31"], ["31"], ["61"]])
+        self.assertEqual([payload["studyId"] for _, payload in submissions], [["0"], ["7"], ["7"], ["7"]])
+
+    def test_final_captcha_submission_is_not_repeated(self) -> None:
+        for final, successful in (
+            ({"status": True, "studyId": "8"}, True),
+            ({"status": True}, False), ({"status": False}, False),
+        ):
+            with self.subTest(final=final):
+                clock = VirtualClock()
+                submissions = []
+                responses = iter([
+                    {"status": True, "studyId": 7}, {"status": True, "studyId": 7},
+                    {"need_code": 1}, final,
+                ])
+
+                def handler(request: httpx.Request) -> httpx.Response:
+                    if request.url.path == "/service/code/aa":
+                        return httpx.Response(200, content=b"captcha")
+                    submissions.append((clock.now, parse_qs(request.content.decode())))
+                    return httpx.Response(200, json=next(responses))
+
+                bot, _ = self.make_bot(handler, clock=clock)
+                with patch.object(bot, "_send_online_pings"):
+                    self.assertIs(bot.update_study_progress(VIDEO), successful)
+                self.assertEqual([when for when, _ in submissions], [0, 30, 45, 45])
+                self.assertEqual([payload["studyTime"] for _, payload in submissions], [["1"], ["31"], ["46"], ["46"]])
+                self.assertEqual(submissions[-1][1]["code"], ["abcd"])
+
     def test_unreadable_captcha_terminates_without_resubmission(self) -> None:
         study_requests = []
 

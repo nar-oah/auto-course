@@ -156,7 +156,6 @@ class BotTests(unittest.TestCase):
             (200, {"status": True, "studyId": "invalid"}),
             (200, {"status": True, "studyId": "0"}),
             (503, {"status": True, "studyId": 99}),
-            (429, {"status": True, "studyId": 99}),
             (None, None),
         ]
         for status, body in outcomes:
@@ -263,14 +262,14 @@ class BotTests(unittest.TestCase):
         self.assertEqual(len(study_requests), 1)
 
     def test_fatal_progress_failure_stops_domain_without_consuming_next_video(self) -> None:
-        for status, body in ((200, {"status": False}), (200, {"offline": 1}), (403, {"status": True, "studyId": 9})):
+        for status, body in ((200, {"status": False}), (200, {"offline": 1}), (403, {"status": True, "studyId": 9}), (429, {})):
             with self.subTest(status=status, body=body):
                 submissions = []
                 consumed = []
 
                 def handler(request: httpx.Request) -> httpx.Response:
                     submissions.append(request)
-                    return httpx.Response(status, json=body)
+                    return httpx.Response(status, json=body, headers={"Retry-After": "120"} if status == 429 else {})
 
                 def videos():
                     consumed.append(VIDEO.id)

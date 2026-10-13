@@ -74,15 +74,15 @@ class TaskTests(unittest.TestCase):
         self.assertTrue(client.client.is_closed)
 
     def test_rejection_and_failed_final_progress_stop_domain_and_close_session(self) -> None:
-        for fail_at in (1, 3):
-            with self.subTest(fail_at=fail_at):
+        for fail_at, failure in ((1, {"status": False}), (3, {"status": False}), (3, {})):
+            with self.subTest(fail_at=fail_at, failure=failure):
                 payloads = []
 
                 def handler(request: httpx.Request) -> httpx.Response:
                     self.assertEqual(request.url.path, "/user/node/study")
                     payloads.append(parse_qs(request.content.decode()))
                     if len(payloads) == fail_at:
-                        return httpx.Response(200, json={"status": False})
+                        return httpx.Response(200, json=failure)
                     return httpx.Response(200, json={"status": True, "studyId": 7})
 
                 bot, client = self.make_domain_bot(handler)

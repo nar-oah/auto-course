@@ -1,6 +1,8 @@
 from collections.abc import Callable
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+import math
+from threading import Event
 import time
 from typing import Any
 
@@ -10,6 +12,7 @@ from .models import StudyInfo
 
 
 RETRY_STATUSES = {429, 500, 502, 503, 504}
+MAX_RETRY_AFTER = 60
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:145.0) "
     "Gecko/20100101 Firefox/145.0"
@@ -35,11 +38,9 @@ class StudyClient:
         *,
         transport: httpx.BaseTransport | None = None,
         sleep: Callable[[float], None] = time.sleep,
-        check: Callable[[], None] = lambda: None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.sleep = sleep
-        self.check = check
         self.client = httpx.Client(
             base_url=self.base_url,
             headers={
@@ -66,35 +67,52 @@ class StudyClient:
         if value is None:
             return None
         try:
-            return max(0.0, float(value))
+            delay = float(value)
+            return max(0.0, delay) if math.isfinite(delay) else None
         except ValueError:
             try:
                 retry_at = parsedate_to_datetime(value)
                 if retry_at.tzinfo is None:
                     retry_at = retry_at.replace(tzinfo=timezone.utc)
-                return max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
+                delay = (retry_at - datetime.now(timezone.utc)).total_seconds()
+                return max(0.0, delay) if math.isfinite(delay) else None
             except (ValueError, TypeError, OverflowError):
                 return None
 
-    def request(self, method: str, local: str, **kwargs: Any) -> httpx.Response | None:
-        # Match the old Session's three retries, including POST requests.
-        for attempt in range(4):
-            self.check()
+    def request(
+        self,
+        method: str,
+        local: str,
+        *,
+        retry: bool = True,
+        stop: Event | None = None,
+        **kwargs: Any,
+    ) -> httpx.Response | None:
+        # Progress submissions are retried by the study loop after its wait.
+        for attempt in range(4 if retry else 1):
+            if stop is not None and stop.is_set():
+                return None
             response = None
             try:
                 response = self.client.request(method, local, **kwargs)
             except httpx.RequestError:
                 pass
             else:
-                if response.status_code not in RETRY_STATUSES:
+                if not retry or response.status_code not in RETRY_STATUSES:
                     return response
-            if attempt == 3:
+            if not retry or attempt == 3:
                 return None
             delay = self._retry_after(response)
             if delay is None:
-                delay = 0 if attempt == 0 else 2**attempt
-            if delay:
+                delay = 2**attempt
+            elif delay > MAX_RETRY_AFTER:
+                # End this request instead of retrying before the server permits it.
+                return None
+            delay = max(1.0, delay)
+            if stop is None:
                 self.sleep(delay)
+            elif stop.wait(delay):
+                return None
         return None
 
     def get_captcha(self, local: str) -> httpx.Response | None:
@@ -124,10 +142,11 @@ class StudyClient:
             },
         )
 
-    def post_online(self) -> httpx.Response | None:
+    def post_online(self, stop: Event | None = None) -> httpx.Response | None:
         return self.request(
             "POST",
             "/user/online",
+            stop=stop,
             headers={"Accept": "application/json", "X-Requested-With": "XMLHttpRequest"},
         )
 
@@ -142,6 +161,8 @@ class StudyClient:
         return self.request(
             "POST",
             "/user/node/study",
+            retry=False,
+            follow_redirects=False,
             data=payload,
             headers={
                 "Accept": "application/json",

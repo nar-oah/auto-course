@@ -2,22 +2,14 @@
 
 `backend/api` accepts account credentials at `POST /start` and publishes
 `study.start` to Redis through Celery. It returns an empty `202 Accepted` response.
-`POST /stop` accepts only `{"username": "account"}` and returns an empty
-`204 No Content` response. It signals all currently running discovery and domain
-tasks for that exact account through Redis. If none are found it does nothing.
-Tasks check for cancellation before HTTP requests and during study/retry waits;
-an in-flight HTTP request finishes within its configured timeout, then the task
-joins its heartbeat thread and closes its HTTP client. Signals expire after one
-hour and are removed on task exit; subsequent submissions use new task IDs.
 `backend/study` discovers learning domains from links with an `h3` title containing
 `课程`, deduplicates them in page order, and publishes one `study.run_domain` task
 per domain. Each domain task uses one HTTPX client for
 captcha recognition, login, course/video discovery, online heartbeats and progress
 submission. Only the API exposes HTTP; study runs as a Celery worker.
 
-`backend/contracts` contains the credentials and stop request models and the
-cancellation key convention shared by the two services. Course, video and
-progress models belong to study. There is no task
+`backend/contracts` contains only the credentials model shared by the two
+services. Course, video and progress models belong to study. There is no task
 result backend, task status API, polling or user task log storage.
 
 ## Backend
@@ -58,8 +50,6 @@ proxy removes `/auto-course` before forwarding requests to FastAPI.
 `frontend/app` contains the form and the generated-schema API client. Web passes
 browser fetch; Desktop passes Tauri HTTP plugin fetch. Credentials remain only in
 component memory, and a successful submission displays only a receipt message.
-The Stop button beside Submit validates only the account and sends no password;
-its receipt confirms submission of the request, without reporting task status.
 
 ```sh
 cd frontend

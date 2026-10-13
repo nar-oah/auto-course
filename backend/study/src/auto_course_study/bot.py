@@ -5,15 +5,19 @@ import time
 from typing import Protocol
 
 from auto_course_contracts import Credentials
+import httpx
 
 from .catalog import VideoList
-from .cancellation import StudyStopped
 from .http import StudyClient, json_object
 from .models import Config, StudyInfo, Video
 
 
 class CaptchaRecognizer(Protocol):
     def classification(self, image: bytes) -> str: ...
+
+
+class StudyAborted(RuntimeError):
+    """The domain cannot safely continue submitting progress."""
 
 
 class CourseBot:
@@ -35,7 +39,7 @@ class CourseBot:
 
     def recognize_captcha(self, path: str) -> str | None:
         response = self.client.get_captcha(f"{path}?r={time.time()}")
-        if response is None:
+        if response is None or not response.is_success:
             return None
         if self.ocr is None:
             # Loading ONNX/OCR is only needed inside the domain worker.
@@ -52,14 +56,16 @@ class CourseBot:
         response = self.client.post_login(
             self.credentials.username, self.credentials.password, code
         )
-        return bool(json_object(response).get("status", False))
+        if response is None or not response.is_success:
+            return False
+        status = json_object(response).get("status")
+        # Preserve the old login's integer success flag without accepting
+        # arbitrary truthy strings, numbers or containers as authentication.
+        return isinstance(status, (bool, int)) and status == 1
 
     def _send_online_pings(self, stop: threading.Event) -> None:
         while not stop.is_set():
-            try:
-                self.client.post_online()
-            except StudyStopped:
-                return
+            self.client.post_online(stop=stop)
             stop.wait(self.config.online_interval)
 
     @staticmethod
@@ -69,32 +75,52 @@ class CourseBot:
         study_id = response.get("studyId")
         if isinstance(study_id, bool):
             return None
-        if isinstance(study_id, int):
+        if isinstance(study_id, int) and study_id >= 0:
             return study_id
         if isinstance(study_id, str) and study_id.isdecimal():
-            return int(study_id)
+            try:
+                return int(study_id)
+            except ValueError:
+                return None
         return None
+
+    @staticmethod
+    def _progress_data(response: httpx.Response | None) -> dict[str, object]:
+        if response is None:
+            return {}
+        if 400 <= response.status_code < 500:
+            raise StudyAborted("Progress submission was rejected")
+        return json_object(response) if response.is_success else {}
 
     def _submit_progress(self, info: StudyInfo) -> int | None:
-        data = json_object(self.client.post_study(info))
-        study_id = self._study_id(data)
-        if study_id is not None:
-            return study_id
-        if data.get("need_code", 0) == 1:
+        data = self._progress_data(self.client.post_study(info))
+        if data.get("status") is not True and data.get("need_code", 0) == 1:
             code = self.recognize_captcha("/service/code/aa")
-            if code:
-                return self._study_id(json_object(self.client.post_study(info, code)))
-        elif data.get("offline", 0) == 1 and self.login():
-            return self._study_id(json_object(self.client.post_study(info)))
-        # One recovery per submission bounds repeated captcha/offline challenges.
+            if not code:
+                raise StudyAborted("Unable to recover the progress captcha")
+            # A captcha permits one supplement of this payload. Its response must
+            # confirm a studyId before the loop can treat it as accepted.
+            data = self._progress_data(self.client.post_study(info, code))
+        if data.get("status") is True:
+            return self._study_id(data)
+        if data.get("offline", 0) == 1:
+            if not self.login():
+                raise StudyAborted("Unable to restore the login session")
+            # Login restores cookies, not confirmation of the previous progress.
+            # The next submission belongs to the next timed loop iteration.
+            return None
+        if data.get("need_code", 0) == 1:
+            return None
+        if data.get("status") is False:
+            raise StudyAborted("Progress submission was rejected")
         return None
 
-    def update_study_progress(self, video: Video) -> None:
+    def update_study_progress(self, video: Video) -> bool:
         finish_time = math.ceil(
             (video.total_duration - video.watched_duration) * self.config.finish_progress
         )
         if finish_time <= 1:
-            return
+            return True
         stop = threading.Event()
         online_thread = threading.Thread(
             target=self._send_online_pings, args=(stop,), daemon=True
@@ -105,20 +131,30 @@ class CourseBot:
             study_time = 1
             next_time = 0
             failures = 0
-            while failures < self.config.max_failures:
+            while study_time < finish_time and failures < self.config.max_failures:
                 self.sleep(next_time)
-                study_time += next_time
+                # Keep the scheduled wait without submitting past the target.
+                study_time = min(study_time + next_time, finish_time)
                 info = StudyInfo(video.id, study_id, study_time)
-                next_id = self._submit_progress(info)
+                try:
+                    next_id = self._submit_progress(info)
+                except StudyAborted:
+                    return False
                 if next_id is None:
                     failures += 1
-                    # Retry this payload, including the final progress submission.
-                    next_time = 0
-                    continue
-                study_id = next_id
+                else:
+                    study_id = next_id
+                # Like the original loop, submit the boundary once, then exit.
+                # An unconfirmed final submission must also stop the domain.
                 if study_time >= finish_time:
-                    break
-                next_time = min(self.config.study_interval, finish_time - study_time)
+                    return next_id is not None
+                # Preserve the scheduled wait on failure/relogin, as before.
+                # The initial zero wait must never carry into an uncertain retry.
+                if next_id is not None or next_time == 0:
+                    next_time = min(
+                        self.config.study_interval, finish_time - study_time
+                    )
+            return False
         finally:
             stop.set()
             # Do not close/reuse the domain Client while a heartbeat is in flight.
@@ -128,4 +164,5 @@ class CourseBot:
         if not self.login():
             return
         for video in self.video_list.get_videos():
-            self.update_study_progress(video)
+            if not self.update_study_progress(video):
+                return

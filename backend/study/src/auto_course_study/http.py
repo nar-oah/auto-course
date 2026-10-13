@@ -143,6 +143,7 @@ class StudyClient:
             "POST",
             "/user/node/study",
             retry=False,
+            follow_redirects=False,
             data=payload,
             headers={
                 "Accept": "application/json",

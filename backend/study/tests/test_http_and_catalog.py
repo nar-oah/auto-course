@@ -88,6 +88,17 @@ class HttpTests(unittest.TestCase):
         handler.assert_called_once()
         sleep.assert_not_called()
 
+    def test_study_redirect_does_not_replay_the_request(self) -> None:
+        for status in (302, 307, 308):
+            with self.subTest(status=status):
+                response = httpx.Response(status, headers={"Location": "/user/node/study"})
+                handler = Mock(side_effect=[response, httpx.Response(200)])
+                sleep = Mock()
+                with StudyClient("https://courses.example", transport=httpx.MockTransport(handler), sleep=sleep) as client:
+                    self.assertIs(client.post_study(StudyInfo("video-1", 0, 1)), response)
+                handler.assert_called_once()
+                sleep.assert_not_called()
+
     def test_study_without_captcha_omits_code(self) -> None:
         handler = Mock(return_value=httpx.Response(200))
         with StudyClient("https://courses.example", transport=httpx.MockTransport(handler)) as client:

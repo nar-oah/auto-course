@@ -85,7 +85,7 @@ class CourseBot:
     def _progress_data(response: httpx.Response | None) -> dict[str, object]:
         if response is None:
             return {}
-        if 400 <= response.status_code < 500 and response.status_code != 429:
+        if 400 <= response.status_code < 500:
             raise StudyAborted("Progress submission was rejected")
         return json_object(response) if response.is_success else {}
 

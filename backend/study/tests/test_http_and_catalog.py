@@ -1,22 +1,24 @@
 from collections import Counter
 import unittest
 from unittest.mock import Mock
+from urllib.parse import parse_qs
 
 import httpx
 
 from auto_course_study.catalog import VideoList
 from auto_course_study.discovery import discover_domains
 from auto_course_study.http import StudyClient, json_object
+from auto_course_study.models import StudyInfo
 
 
 class HttpTests(unittest.TestCase):
-    def test_retries_exhaust_after_four_requests_with_original_backoff(self) -> None:
+    def test_retries_exhaust_after_four_requests_with_positive_backoff(self) -> None:
         handler = Mock(return_value=httpx.Response(503))
         sleep = Mock()
         with StudyClient("https://courses.example", transport=httpx.MockTransport(handler), sleep=sleep) as client:
             self.assertIsNone(client.request("POST", "/user/online"))
             self.assertEqual(handler.call_count, 4)
-        self.assertEqual([call.args[0] for call in sleep.call_args_list], [2, 4])
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [1, 2, 4])
 
     def test_retry_after_and_transport_errors(self) -> None:
         responses = [
@@ -34,7 +36,65 @@ class HttpTests(unittest.TestCase):
         sleep = Mock()
         with StudyClient("https://courses.example", transport=httpx.MockTransport(handler), sleep=sleep) as client:
             self.assertEqual(json_object(client.post_online()), {"status": True})
-        sleep.assert_called_once_with(3)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [1, 3])
+
+    def test_retry_after_never_causes_an_immediate_retry(self) -> None:
+        for retry_after in ("0", "-3", "Mon, 01 Jan 2001 00:00:00 GMT"):
+            with self.subTest(retry_after=retry_after):
+                handler = Mock(side_effect=[
+                    httpx.Response(429, headers={"Retry-After": retry_after}),
+                    httpx.Response(200),
+                ])
+                sleep = Mock()
+                with StudyClient("https://courses.example", transport=httpx.MockTransport(handler), sleep=sleep) as client:
+                    self.assertEqual(client.post_online().status_code, 200)
+                self.assertEqual(handler.call_count, 2)
+                sleep.assert_called_once_with(1)
+
+    def test_invalid_retry_after_uses_backoff(self) -> None:
+        for retry_after in ("invalid", "nan", "inf"):
+            with self.subTest(retry_after=retry_after):
+                handler = Mock(return_value=httpx.Response(503, headers={"Retry-After": retry_after}))
+                sleep = Mock()
+                with StudyClient("https://courses.example", transport=httpx.MockTransport(handler), sleep=sleep) as client:
+                    self.assertIsNone(client.post_online())
+                self.assertEqual(handler.call_count, 4)
+                self.assertEqual([call.args[0] for call in sleep.call_args_list], [1, 2, 4])
+
+    def test_study_posts_once_and_preserves_failure_response(self) -> None:
+        info = StudyInfo(video_id="video-1", study_id=42, time=31)
+        for status in (200, 400, 403, 429, 500, 502, 503, 504):
+            with self.subTest(status=status):
+                response = httpx.Response(status, json={"status": status == 200}, headers={"Retry-After": "0"})
+                handler = Mock(return_value=response)
+                sleep = Mock()
+                with StudyClient("https://courses.example", transport=httpx.MockTransport(handler), sleep=sleep) as client:
+                    self.assertIs(client.post_study(info, "captcha"), response)
+                handler.assert_called_once()
+                request = handler.call_args.args[0]
+                self.assertEqual(request.method, "POST")
+                self.assertEqual(request.url.path, "/user/node/study")
+                self.assertEqual(parse_qs(request.content.decode()), {
+                    "nodeId": ["video-1"], "studyId": ["42"],
+                    "studyTime": ["31"], "code": ["captcha"],
+                })
+                sleep.assert_not_called()
+
+    def test_study_transport_error_is_not_retried(self) -> None:
+        handler = Mock(side_effect=httpx.ConnectError("connection failed"))
+        sleep = Mock()
+        with StudyClient("https://courses.example", transport=httpx.MockTransport(handler), sleep=sleep) as client:
+            self.assertIsNone(client.post_study(StudyInfo("video-1", 0, 1)))
+        handler.assert_called_once()
+        sleep.assert_not_called()
+
+    def test_study_without_captcha_omits_code(self) -> None:
+        handler = Mock(return_value=httpx.Response(200))
+        with StudyClient("https://courses.example", transport=httpx.MockTransport(handler)) as client:
+            client.post_study(StudyInfo("video-1", 0, 1))
+        self.assertEqual(parse_qs(handler.call_args.args[0].content.decode()), {
+            "nodeId": ["video-1"], "studyId": ["0"], "studyTime": ["1"],
+        })
 
     def test_redirects_keep_cookie_and_close_client(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:

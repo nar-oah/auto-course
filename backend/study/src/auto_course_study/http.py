@@ -1,6 +1,7 @@
 from collections.abc import Callable
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+import math
 import time
 from typing import Any
 
@@ -64,7 +65,8 @@ class StudyClient:
         if value is None:
             return None
         try:
-            return max(0.0, float(value))
+            delay = float(value)
+            return max(0.0, delay) if math.isfinite(delay) else None
         except ValueError:
             try:
                 retry_at = parsedate_to_datetime(value)
@@ -74,24 +76,25 @@ class StudyClient:
             except (ValueError, TypeError, OverflowError):
                 return None
 
-    def request(self, method: str, local: str, **kwargs: Any) -> httpx.Response | None:
-        # Match the old Session's three retries, including POST requests.
-        for attempt in range(4):
+    def request(
+        self, method: str, local: str, *, retry: bool = True, **kwargs: Any
+    ) -> httpx.Response | None:
+        # Progress submissions are retried by the study loop after its wait.
+        for attempt in range(4 if retry else 1):
             response = None
             try:
                 response = self.client.request(method, local, **kwargs)
             except httpx.RequestError:
                 pass
             else:
-                if response.status_code not in RETRY_STATUSES:
+                if not retry or response.status_code not in RETRY_STATUSES:
                     return response
-            if attempt == 3:
+            if not retry or attempt == 3:
                 return None
             delay = self._retry_after(response)
             if delay is None:
-                delay = 0 if attempt == 0 else 2**attempt
-            if delay:
-                self.sleep(delay)
+                delay = 2**attempt
+            self.sleep(max(1.0, delay))
         return None
 
     def get_captcha(self, local: str) -> httpx.Response | None:
@@ -139,6 +142,7 @@ class StudyClient:
         return self.request(
             "POST",
             "/user/node/study",
+            retry=False,
             data=payload,
             headers={
                 "Accept": "application/json",

@@ -35,11 +35,9 @@ class StudyClient:
         *,
         transport: httpx.BaseTransport | None = None,
         sleep: Callable[[float], None] = time.sleep,
-        check: Callable[[], None] = lambda: None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.sleep = sleep
-        self.check = check
         self.client = httpx.Client(
             base_url=self.base_url,
             headers={
@@ -79,7 +77,6 @@ class StudyClient:
     def request(self, method: str, local: str, **kwargs: Any) -> httpx.Response | None:
         # Match the old Session's three retries, including POST requests.
         for attempt in range(4):
-            self.check()
             response = None
             try:
                 response = self.client.request(method, local, **kwargs)

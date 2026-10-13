@@ -112,9 +112,26 @@ class BotTests(unittest.TestCase):
         with patch.object(bot, "_send_online_pings"):
             self.assertTrue(bot.update_study_progress(VIDEO))
         self.assertEqual(login_at, [30])
-        self.assertEqual(submitted_at, [0, 30, 45])
+        self.assertEqual(submitted_at, [0, 30, 60])
         self.assertEqual([payload["studyId"] for payload in payloads], [["0"], ["7"], ["7"]])
-        self.assertEqual([payload["studyTime"] for payload in payloads], [["1"], ["31"], ["46"]])
+        self.assertEqual([payload["studyTime"] for payload in payloads], [["1"], ["31"], ["61"]])
+
+    def test_failed_midway_submission_preserves_the_scheduled_wait(self) -> None:
+        clock = VirtualClock()
+        submissions = []
+        responses = iter([{"status": True, "studyId": 7}, {}, {"status": True, "studyId": 7}])
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            submissions.append((clock.now, parse_qs(request.content.decode())))
+            return httpx.Response(200, json=next(responses))
+
+        bot, _ = self.make_bot(handler, clock=clock)
+        with patch.object(bot, "_send_online_pings"):
+            self.assertTrue(bot.update_study_progress(VIDEO))
+        self.assertEqual([when for when, _ in submissions], [0, 30, 60])
+        self.assertEqual([payload["studyTime"] for _, payload in submissions], [["1"], ["31"], ["61"]])
+        self.assertEqual([payload["studyId"] for _, payload in submissions], [["0"], ["7"], ["7"]])
+        self.assertEqual([call.args[0] for call in bot.sleep.call_args_list], [0, 30, 30])
 
     def test_repeated_offline_challenges_stop_after_five_failed_submissions(self) -> None:
         submitted_at = []
@@ -324,6 +341,44 @@ class BotTests(unittest.TestCase):
         stop, thread = heartbeats[0]
         self.assertTrue(stop.is_set())
         self.assertFalse(thread.is_alive())
+
+    def test_heartbeat_stops_and_joins_on_terminal_progress_results(self) -> None:
+        for failure in ("rejected", "offline", "budget", "captcha", "final"):
+            with self.subTest(failure=failure):
+                heartbeats = []
+                started = threading.Event()
+                study_calls = 0
+
+                def heartbeat(stop: threading.Event) -> None:
+                    heartbeats.append((stop, threading.current_thread()))
+                    started.set()
+                    stop.wait()
+
+                def handler(request: httpx.Request) -> httpx.Response:
+                    nonlocal study_calls
+                    if request.url.path == "/service/code/aa":
+                        return httpx.Response(200, content=b"captcha")
+                    study_calls += 1
+                    if failure == "rejected":
+                        body = {"status": False}
+                    elif failure == "offline":
+                        body = {"offline": 1}
+                    elif failure == "captcha":
+                        body = {"need_code": 1}
+                    elif failure == "final" and study_calls < 3:
+                        body = {"status": True, "studyId": 7}
+                    else:
+                        body = {}
+                    return httpx.Response(200, json=body)
+
+                bot, _ = self.make_bot(handler, config=Config(max_failures=2))
+                bot.ocr.classification.return_value = ""
+                bot.sleep.side_effect = lambda seconds: self.assertTrue(started.wait(timeout=1))
+                with patch.object(bot, "_send_online_pings", side_effect=heartbeat), patch.object(bot, "login", return_value=False):
+                    self.assertFalse(bot.update_study_progress(VIDEO))
+                stop, thread = heartbeats[0]
+                self.assertTrue(stop.is_set())
+                self.assertFalse(thread.is_alive())
 
     def test_each_video_owns_its_heartbeat_event(self) -> None:
         bot, _ = self.make_bot(lambda request: httpx.Response(200, json={"status": True, "studyId": 1}))

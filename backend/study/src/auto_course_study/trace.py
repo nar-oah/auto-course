@@ -281,6 +281,7 @@ class StudyTrace:
         if token is None:
             return
         with self.lock:
+            self.counts[f"progress_decision:{decision}"] += 1
             self.last_progress = self._record("progress_end", {
                 **{k: v for k, v in token.items() if k != "started"},
                 "duration_seconds": self.elapsed(token["started"]),
@@ -381,10 +382,11 @@ class StudyTrace:
             self.http[f"status:{status}"] += 1
             if error is not None:
                 self.http[f"exception:{type(error).__name__}"] += 1
-            window = self.request_windows[-1]
+            minute = int((token["started"] - self.started) // 60)
+            window = next((w for w in reversed(self.request_windows) if w["minute"] == minute), self.request_windows[-1])
             window["errors"] += int(error is not None)
             window["http_429"] += int(status == 429)
-            window["http_5xx"] += int(status is not None and status >= 500)
+            window["http_5xx"] += int(status is not None and 500 <= status < 600)
             history = [] if response is None else [r.status_code for r in response.history]
             self.http["redirects"] += len(history)
             fields = {
@@ -439,6 +441,8 @@ class StudyTrace:
                 "courses_discovered": self.counts["course_discovered"],
                 "pending_videos_discovered": self.counts["pending_video_discovered"],
                 "catalog_complete": self.counts["catalog_complete"] > 0,
+                "videos_started": self.counts["video_start"],
+                "videos_ended": self.counts["video_end"],
             }
             payload = {"type": "study_trace", "task_id": self.task_id, "domain": self.domain, "summary": summary}
             abnormal = self.first_anomaly is not None or self.result not in {"completed", "empty_video_list"}

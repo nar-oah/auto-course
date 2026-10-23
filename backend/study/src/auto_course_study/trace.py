@@ -106,6 +106,8 @@ class StudyTrace:
     def _clean(self, value, depth=0):
         if depth > 6:
             return "[depth limit]"
+        if isinstance(value, int) and not isinstance(value, bool) and str(value) in self.secrets:
+            return "[redacted]"
         if value is None or isinstance(value, (bool, int)):
             return value
         if isinstance(value, float):
@@ -204,7 +206,7 @@ class StudyTrace:
 
     def _business_value(self, value):
         if value is None or isinstance(value, (bool, int)):
-            return value
+            return self._clean(value)
         if isinstance(value, float):
             return self._clean(value)
         if isinstance(value, str) and len(value) <= 32:
@@ -233,9 +235,10 @@ class StudyTrace:
         for name in ("status", "need_code", "offline", "error_code", "errorCode", "errcode", "errno", "resultCode"):
             if name in data:
                 fields[name] = self._business_value(data[name])
-        # A generic 'code' can be an echoed captcha. Only expose numeric codes.
+        # A generic 'code' can be an echoed captcha. Known OCR values are scrubbed
+        # even if the server converts them to integers.
         if isinstance(data.get("code"), int) and not isinstance(data["code"], bool):
-            fields["code"] = data["code"]
+            fields["code"] = self._business_value(data["code"])
         fields["studyId"] = self.study_id(data.get("studyId"), present="studyId" in data)
         return fields
 

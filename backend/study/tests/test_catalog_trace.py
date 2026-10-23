@@ -5,6 +5,7 @@ from unittest.mock import Mock, patch
 import httpx
 
 from auto_course_study import trace
+from auto_course_study import catalog
 from auto_course_study.catalog import VideoList
 from auto_course_study.http import StudyClient
 from test_trace import captured_trace, payloads
@@ -192,6 +193,26 @@ class CatalogTraceTests(unittest.TestCase):
         self.assertEqual(payload["summary"]["first_anomaly"]["exception_type"], "RuntimeError")
         self.assertIn("course_pagination_parse_exception", payload["summary"]["catalog_issue_counts"])
         self.assertNotIn("private parser text", json.dumps(payload))
+
+    def test_course_parser_one_time_failure_is_not_consumed_by_diagnostics(self):
+        parser = catalog.BeautifulSoup
+        runs = []
+        for enabled in (None, "1"):
+            calls = []
+
+            def parse_once(html, *args, **kwargs):
+                calls.append(html)
+                if len(calls) == 2:
+                    raise RuntimeError("private one-time parsing failure")
+                return parser(html, *args, **kwargs)
+
+            with patch("auto_course_study.catalog.BeautifulSoup", side_effect=parse_once):
+                runs.append(self.run_catalog({}, enabled=enabled))
+            self.assertEqual(len(calls), 2)
+        self.assertIs(type(runs[0][1]), RuntimeError)
+        self.assertIs(type(runs[1][1]), RuntimeError)
+        self.assertEqual(runs[0][2:4], runs[1][2:4])
+        self.assertEqual(runs[1][4][0]["summary"]["result"], "exception")
 
     def test_broken_diagnostic_inspection_does_not_interrupt_catalog_business(self):
         responses = {"/user/study_record.json": httpx.Response(200, json={

@@ -62,6 +62,7 @@ class TraceTests(unittest.TestCase):
         config=Config(),
         login_status=True,
         heartbeat=False,
+        credentials=CREDENTIALS,
     ):
         requests = []
         study_waits = Mock()
@@ -112,7 +113,7 @@ class TraceTests(unittest.TestCase):
         ):
             tasks.run_domain.push_request(id=TASK_ID)
             try:
-                result = tasks.run_domain.run(DOMAIN, CREDENTIALS)
+                result = tasks.run_domain.run(DOMAIN, credentials)
             except Exception as exc:
                 error = exc
                 result = None
@@ -156,7 +157,127 @@ class TraceTests(unittest.TestCase):
         log = self.only_log(run)
         self.assertNotIn("events", log)
         self.assertIsNone(log["summary"]["first_anomaly"])
+        self.assertEqual(log["summary"]["result"], "completed")
+        self.assertEqual(log["summary"]["reason"], "traversal_completed")
+        self.assertEqual(log["summary"]["celery_return"], "returned")
         self.assertEqual(run["study_waits"], [0, 30, 15, 0, 30, 15])
+
+    def test_business_rejection_and_early_returns_are_distinct_from_celery_success(self):
+        cases = (
+            ("rejected", ({"status": False},), (VIDEO, NEXT_VIDEO), Config(), True, "progress_rejected", "business_rejected"),
+            ("unconfirmed_boundary", ({"status": True, "studyId": 7}, {"status": True, "studyId": 7}, {}), (VIDEO, NEXT_VIDEO), Config(), True, "progress_unconfirmed", "boundary_unconfirmed"),
+            ("budget", ({}, {}), (LONG_VIDEO, NEXT_VIDEO), Config(max_failures=2), True, "failure_budget_exhausted", "failure_budget_exhausted"),
+            ("login", (), (VIDEO,), Config(), False, "login_failed", "initial_login_failed"),
+            ("empty", (), (), Config(), True, "empty_video_list", "empty_video_list"),
+        )
+        for name, responses, videos, config, login_status, result, reason in cases:
+            with self.subTest(name=name):
+                pending = list(responses)
+
+                def handler(request):
+                    return httpx.Response(200, json=pending.pop(0))
+
+                log = self.only_log(self.run_task(
+                    handler, videos=videos, config=config, login_status=login_status,
+                ))
+                summary = log["summary"]
+                self.assertEqual(summary["result"], result)
+                self.assertEqual(summary["reason"], reason)
+                self.assertEqual(summary["celery_return"], "returned")
+                if name == "empty":
+                    self.assertNotIn("events", log)
+                    self.assertIsNone(summary["last_progress"])
+                else:
+                    self.assertTrue(log["events"])
+                    self.assertIsNotNone(summary["first_anomaly"])
+                if responses:
+                    self.assertFalse(summary["last_progress"]["confirmed"])
+                    self.assertEqual(summary["last_progress"]["response"]["http_status"], 200)
+                    self.assertEqual(summary["counts"]["video_start"], 1)
+                if name == "rejected":
+                    self.assertFalse(summary["last_progress"]["response"]["status"])
+                    self.assertEqual(summary["last_progress"]["decision"], "exit_business_rejected")
+
+    def test_video_transition_records_immediate_next_start_and_last_response(self):
+        submissions = 0
+
+        def handler(request):
+            nonlocal submissions
+            submissions += 1
+            return httpx.Response(200, json={
+                "status": submissions < 4, "studyId": 7,
+            })
+
+        log = self.only_log(self.run_task(handler, videos=(VIDEO, NEXT_VIDEO)))
+        starts = [event for event in log["events"] if event["event"] == "video_start"]
+        ends = [event for event in log["events"] if event["event"] == "video_end"]
+        progress = [event for event in log["events"] if event["event"] == "progress_start"]
+        self.assertEqual([event["video_ordinal"] for event in starts], [1, 2])
+        self.assertNotEqual(starts[0]["video"], starts[1]["video"])
+        self.assertLess(ends[0]["seq"], starts[1]["seq"])
+        self.assertLess(starts[1]["seq"], progress[3]["seq"])
+        self.assertGreaterEqual(starts[1]["since_previous_video_end"], 0)
+        self.assertEqual(ends[0]["reason"], "boundary_confirmed")
+        self.assertEqual(starts[0]["total_duration"], 100)
+        self.assertEqual(starts[0]["watched_duration"], 50)
+        self.assertEqual(starts[0]["raw_progress"], .5)
+        self.assertEqual(starts[0]["finish_time"], 46)
+        self.assertEqual([event["studyTime"] for event in progress], [1, 31, 46, 1])
+        self.assertEqual([event["submission"] for event in progress], [1, 2, 3, 4])
+        self.assertEqual([event["video_changed"] for event in progress], [False, False, False, True])
+        self.assertEqual(log["summary"]["last_progress"]["video"], starts[1]["video"])
+        for private in (VIDEO.id, NEXT_VIDEO.id, COURSE.id, VIDEO.name, COURSE.name):
+            self.assertNotIn(private, json.dumps(log))
+
+    def test_captcha_duplicate_and_relogin_recovery_have_explicit_causes(self):
+        pending = [
+            {"need_code": 1}, {"status": True, "studyId": "7"},
+            {"offline": 1}, {"status": False, "errorCode": 409},
+        ]
+        log = self.only_log(self.run_task(
+            lambda request: httpx.Response(200, json=pending.pop(0)),
+        ))
+        starts = [event for event in log["events"] if event["event"] == "progress_start"]
+        ends = [event for event in log["events"] if event["event"] == "progress_end"]
+        self.assertEqual([event["studyTime"] for event in starts], [1, 1, 31, 46])
+        self.assertEqual([event["kind"] for event in starts], ["normal", "captcha", "normal", "normal"])
+        self.assertEqual([event["cause"] for event in starts], ["initial", "captcha", "scheduled", "relogin"])
+        self.assertEqual([event["repeated_study_time"] for event in starts], [False, True, False, False])
+        self.assertEqual([event["decision"] for event in ends], ["captcha_supplement", "confirmed", "restore_login", "exit_business_rejected"])
+        self.assertTrue(ends[1]["confirmed"])
+        self.assertEqual(starts[2]["studyId"]["ref"], ends[1]["response"]["studyId"]["ref"])
+        self.assertEqual(starts[3]["failures"], 1)
+        self.assertGreaterEqual(starts[3]["actual_wait"], 0)
+        logins = [event for event in log["events"] if event["event"] == "login_result"]
+        self.assertEqual([event["login_phase"] for event in logins], ["initial", "recovery"])
+        self.assertTrue(all(event["accepted"] for event in logins))
+        self.assertEqual(log["summary"]["last_progress"]["response"]["errorCode"], 409)
+        for secret in (*CREDENTIALS.values(), CAPTCHA, "private-cookie"):
+            self.assertNotIn(secret, json.dumps(log))
+
+    def test_heartbeat_progress_overlap_is_attributed_to_the_same_video(self):
+        heartbeat_started = threading.Event()
+        progress_started = threading.Event()
+
+        def handler(request):
+            if request.url.path == "/user/online":
+                heartbeat_started.set()
+                self.assertTrue(progress_started.wait(timeout=2))
+                return httpx.Response(200, json={"status": True})
+            self.assertEqual(request.url.path, "/user/node/study")
+            self.assertTrue(heartbeat_started.wait(timeout=2))
+            progress_started.set()
+            return httpx.Response(200, json={"status": False})
+
+        log = self.only_log(self.run_task(handler, heartbeat=True))
+        summary = log["summary"]
+        self.assertEqual(summary["http"]["heartbeat_progress_overlaps"], 1)
+        self.assertEqual(summary["last_heartbeat"]["video"], summary["last_progress"]["video"])
+        self.assertTrue(summary["last_heartbeat"]["overlaps"][0]["same_video"])
+        names = [event["event"] for event in log["events"]]
+        for event in ("heartbeat_thread_started", "heartbeat_thread_stop_requested", "heartbeat_thread_exit", "heartbeat_thread_joined"):
+            self.assertIn(event, names)
+        self.assertLess(names.index("heartbeat_thread_exit"), names.index("heartbeat_thread_joined"))
 
     def test_uncaught_exception_is_preserved_and_flushes_diagnostics(self):
         def fail(request):

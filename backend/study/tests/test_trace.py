@@ -825,6 +825,8 @@ class TraceTests(unittest.TestCase):
         with captured_trace() as records:
             with trace.task_trace(DOMAIN, TASK_ID) as diagnostic:
                 diagnostic.video_start(VIDEO.id, 100, 50, .5, 46)
+                request = diagnostic.http_start("POST", "/user/online")
+                diagnostic.http_end(request, httpx.Response(200, json={"status": True, "msg": "private first heartbeat"}))
                 first = diagnostic.progress_start(StudyInfo(VIDEO.id, 0, 1))
                 request = diagnostic.http_start("POST", "/user/node/study")
                 rejected = httpx.Response(200, json={"status": False, "errorCode": 409})
@@ -838,6 +840,8 @@ class TraceTests(unittest.TestCase):
                 accepted = httpx.Response(200, json={"status": True, "studyId": 7})
                 diagnostic.http_end(request, accepted)
                 diagnostic.progress_end(second, accepted, decision="confirmed", confirmed=True)
+                request = diagnostic.http_start("POST", "/user/online")
+                diagnostic.http_end(request, httpx.Response(200, json={"status": False, "msg": "private final heartbeat"}))
                 for index in range(400):
                     diagnostic.event("later_heartbeat_event", index=index)
                 diagnostic.outcome("task", "completed", "completed")
@@ -846,9 +850,18 @@ class TraceTests(unittest.TestCase):
         first = log["summary"]["first_anomaly"]
         self.assertFalse(first["last_study_request"]["response"]["status"])
         self.assertEqual(first["last_progress"]["decision"], "exit_business_rejected")
+        self.assertTrue(first["last_heartbeat"]["response"]["status"])
         self.assertTrue(log["summary"]["last_study_request"]["response"]["status"])
         self.assertEqual(log["summary"]["last_progress"]["decision"], "confirmed")
         self.assertEqual(log["summary"]["last_study_request"]["final_path"], "/user/node/study")
+        self.assertFalse(log["summary"]["last_heartbeat"]["response"]["status"])
+        self.assertEqual(log["summary"]["last_heartbeat"]["final_path"], "/user/online")
+        self.assertEqual(log["summary"]["http"]["path:/user/online"], 2)
+        self.assertEqual(log["summary"]["http"]["path:/user/node/study"], 2)
+        self.assertGreater(log["summary"]["events_dropped"], 0)
+        self.assert_bounded_records(records)
+        self.assertNotIn("private first heartbeat", json.dumps(log))
+        self.assertNotIn("private final heartbeat", json.dumps(log))
 
     def test_bare_mock_response_keeps_http_and_redirect_diagnostics(self):
         with captured_trace() as records:

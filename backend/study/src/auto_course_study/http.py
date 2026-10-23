@@ -92,13 +92,19 @@ class StudyClient:
         **kwargs: Any,
     ) -> httpx.Response | None:
         # Progress submissions are retried by the study loop after its wait.
+        call_id = self.trace.http_call()
         for attempt in range(4 if retry else 1):
             if stop is not None and stop.is_set():
-                self.trace.event("http_skipped", reason="stop_set", attempt=attempt + 1)
+                self.trace.event(
+                    "http_skipped", reason="stop_set", attempt=attempt + 1,
+                    call_id=call_id, path=self.trace.path(local),
+                )
                 return None
             response = None
             request_error = None
-            token = self.trace.http_start(method, local)
+            token = self.trace.http_start(
+                method, local, call_id=call_id, attempt=attempt + 1, retry_enabled=retry
+            )
             try:
                 response = self.client.request(method, local, **kwargs)
             except httpx.RequestError as error:
@@ -133,7 +139,7 @@ class StudyClient:
                 )
                 self.trace.event(
                     "http_retry_after_limit", attempt=attempt + 1, retry_after=delay,
-                    maximum_wait=MAX_RETRY_AFTER,
+                    maximum_wait=MAX_RETRY_AFTER, call_id=call_id, path=self.trace.path(local),
                 )
                 return None
             delay = max(1.0, delay)
@@ -148,6 +154,7 @@ class StudyClient:
             self.trace.event(
                 "http_retry_wait_start", attempt=attempt + 1, reason=reason,
                 planned_wait=delay, retry_after=retry_after,
+                call_id=call_id, path=self.trace.path(local),
             )
             wait_started = self.trace.clock()
             try:
@@ -157,17 +164,23 @@ class StudyClient:
                     self.trace.retry(
                         attempt + 1, reason, delay,
                         actual_wait=self.trace.elapsed(wait_started), interrupted=True,
+                        request=token,
                     )
                     return None
             except BaseException as error:
                 self.trace.retry(
                     attempt + 1, reason, delay,
                     actual_wait=self.trace.elapsed(wait_started), interrupted=True,
+                    request=token,
                 )
-                self.trace.event("http_retry_wait_exception", error_type=type(error).__name__)
+                self.trace.event(
+                    "http_retry_wait_exception", error_type=type(error).__name__,
+                    call_id=call_id, path=self.trace.path(local), attempt=attempt + 1,
+                )
                 raise
             self.trace.retry(
-                attempt + 1, reason, delay, actual_wait=self.trace.elapsed(wait_started)
+                attempt + 1, reason, delay, actual_wait=self.trace.elapsed(wait_started),
+                request=token,
             )
         return None
 

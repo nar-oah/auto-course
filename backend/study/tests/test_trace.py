@@ -48,7 +48,31 @@ def captured_trace(enabled: str | None = "1"):
 
 
 def payloads(records):
-    return [json.loads(record.getMessage()) for record in records]
+    """Reassemble diagnostic payloads independently of chunk delivery order."""
+    results = []
+    chunks = {}
+    for record in records:
+        payload = json.loads(record.getMessage())
+        if payload["type"] != "study_trace_chunk":
+            results.append(payload)
+            continue
+        if payload["encoding"] != "json_fragment":
+            raise AssertionError("Unknown diagnostic chunk encoding")
+        key = (payload["task_id"], payload["domain"])
+        group = chunks.setdefault(key, {"count": payload["chunk_count"], "parts": {}})
+        if group["count"] != payload["chunk_count"]:
+            raise AssertionError("Inconsistent diagnostic chunk count")
+        index = payload["chunk_index"]
+        if not 1 <= index <= group["count"] or index in group["parts"]:
+            raise AssertionError("Invalid or duplicate diagnostic chunk index")
+        group["parts"][index] = payload["data"]
+    for group in chunks.values():
+        if len(group["parts"]) != group["count"]:
+            raise AssertionError("Missing diagnostic chunk")
+        results.append(json.loads("".join(
+            group["parts"][index] for index in range(1, group["count"] + 1)
+        )))
+    return results
 
 
 class TraceTests(unittest.TestCase):
@@ -124,6 +148,7 @@ class TraceTests(unittest.TestCase):
         self.assertTrue(all(client.client.is_closed for client in clients))
         return {
             "logs": payloads(records), "requests": requests, "result": result,
+            "records": records,
             "error": error,
             "study_waits": [call.args[0] for call in study_waits.call_args_list],
             "http_waits": [call.args[0] for call in http_waits.call_args_list],
@@ -187,7 +212,8 @@ class TraceTests(unittest.TestCase):
                 self.assertEqual(summary["reason"], reason)
                 self.assertEqual(summary["celery_return"], "returned")
                 if name == "empty":
-                    self.assertNotIn("events", log)
+                    self.assertTrue(log["events"])
+                    self.assertIn("task_start", [event["event"] for event in log["events"]])
                     self.assertIsNone(summary["last_progress"])
                 else:
                     self.assertTrue(log["events"])

@@ -5,7 +5,6 @@ import os
 import threading
 import unittest
 from unittest.mock import Mock, patch
-from urllib.parse import parse_qs
 
 import httpx
 
@@ -100,7 +99,9 @@ class TraceTests(unittest.TestCase):
                 ocr=Mock(classification=Mock(return_value=CAPTCHA)), sleep=study_waits,
             )
             bot.video_list.get_videos = Mock(return_value=iter(videos))
-            if not heartbeat:
+            if callable(heartbeat):
+                bot._send_online_pings = lambda stop: heartbeat(bot, stop)
+            elif not heartbeat:
                 bot._send_online_pings = Mock()
             return bot
 
@@ -278,6 +279,34 @@ class TraceTests(unittest.TestCase):
         for event in ("heartbeat_thread_started", "heartbeat_thread_stop_requested", "heartbeat_thread_exit", "heartbeat_thread_joined"):
             self.assertIn(event, names)
         self.assertLess(names.index("heartbeat_thread_exit"), names.index("heartbeat_thread_joined"))
+
+    def test_last_heartbeat_can_be_distinguished_from_progress_on_the_next_video(self):
+        heartbeat_started = threading.Event()
+        heartbeat_calls = []
+        study_calls = []
+
+        def heartbeat(bot, stop):
+            heartbeat_calls.append(stop)
+            if len(heartbeat_calls) == 1:
+                CourseBot._send_online_pings(bot, stop)
+            else:
+                # Hold the second thread before its first ping, simulating a
+                # scheduler that lets the study thread reach rejection first.
+                stop.wait(timeout=2)
+
+        def handler(request):
+            if request.url.path == "/user/online":
+                heartbeat_started.set()
+                return httpx.Response(200, json={"status": True})
+            self.assertTrue(heartbeat_started.wait(timeout=2))
+            study_calls.append(request)
+            return httpx.Response(200, json={"status": len(study_calls) < 4, "studyId": 7})
+
+        log = self.only_log(self.run_task(handler, videos=(VIDEO, NEXT_VIDEO), heartbeat=heartbeat))
+        videos = [event["video"] for event in log["events"] if event["event"] == "video_start"]
+        self.assertEqual(log["summary"]["last_heartbeat"]["video"], videos[0])
+        self.assertEqual(log["summary"]["last_progress"]["video"], videos[1])
+        self.assertNotEqual(videos[0], videos[1])
 
     def test_uncaught_exception_is_preserved_and_flushes_diagnostics(self):
         def fail(request):
@@ -501,6 +530,35 @@ class TraceTests(unittest.TestCase):
         self.assertEqual(log["summary"]["request_windows"][0]["http_5xx"], 1)
         self.assertNotIn("private-timeout-message", json.dumps(log))
         self.assertNotIn("private-redirect-query", json.dumps(log))
+
+    def test_http_no_retry_retry_after_limit_and_exhaustion_have_distinct_outcomes(self):
+        responses = [
+            httpx.Response(429, json={"status": False}, headers={"Retry-After": "60"}),
+            httpx.Response(429, headers={"Retry-After": "3600"}),
+            *[httpx.Response(503) for _ in range(4)],
+        ]
+        handler = Mock(side_effect=responses)
+        sleep = Mock()
+        with captured_trace() as records:
+            with trace.task_trace(DOMAIN, TASK_ID) as diagnostic:
+                with StudyClient(
+                    "https://" + DOMAIN, transport=httpx.MockTransport(handler), sleep=sleep,
+                ) as client:
+                    self.assertIs(client.post_study(StudyInfo(VIDEO.id, 0, 1)), responses[0])
+                    self.assertIsNone(client.post_online())
+                    self.assertIsNone(client.get_page())
+                diagnostic.outcome("task", "completed", "completed")
+        self.assertEqual(handler.call_count, 6)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [1, 2, 4])
+        log = payloads(records)[0]
+        ends = [event for event in log["events"] if event["event"] == "http_end"]
+        self.assertEqual([event["disposition"] for event in ends], [
+            "returned_without_retry", "retry_after_limit", "retry_scheduled",
+            "retry_scheduled", "retry_scheduled", "retries_exhausted",
+        ])
+        limit = next(event for event in log["events"] if event["event"] == "http_retry_after_limit")
+        self.assertEqual(limit["retry_after"], 3600)
+        self.assertFalse(ends[0]["response"]["status"])
 
 
 if __name__ == "__main__":

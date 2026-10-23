@@ -7,6 +7,7 @@ from celery import Celery
 from .bot import CourseBot
 from .discovery import discover_domains
 from .http import StudyClient
+from .trace import task_trace
 
 
 app = Celery("study", broker=os.getenv("CELERY_BROKER_URL", "redis://redis:6379/0"))
@@ -34,6 +35,8 @@ def start(credentials: dict[str, Any]) -> None:
 
 @app.task(name="study.run_domain", ignore_result=True)
 def run_domain(domain: str, credentials: dict[str, Any]) -> None:
-    validated = Credentials.model_validate(credentials)
-    with StudyClient(f"https://{domain}") as client:
-        CourseBot(client, validated).run()
+    with task_trace(domain, run_domain.request.id) as trace:
+        validated = Credentials.model_validate(credentials)
+        trace.protect(validated.username, validated.password)
+        with StudyClient(f"https://{domain}") as client:
+            CourseBot(client, validated).run()

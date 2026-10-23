@@ -211,6 +211,116 @@ class TraceTests(unittest.TestCase):
         self.assertGreater(log["summary"]["events_dropped"], 0)
         self.assertEqual(log["summary"]["first_anomaly"]["reason"], "first_failure")
 
+    def test_concurrent_buffer_writes_preserve_sequence_and_counts(self):
+        with captured_trace() as records:
+            with trace.task_trace(DOMAIN, TASK_ID) as diagnostic:
+                diagnostic.anomaly("dump_for_test", "heartbeat")
+
+                def emit():
+                    for index in range(100):
+                        diagnostic.event("thread_event", index=index)
+
+                workers = [threading.Thread(target=emit) for _ in range(4)]
+                for worker in workers:
+                    worker.start()
+                for worker in workers:
+                    worker.join(timeout=2)
+                    self.assertFalse(worker.is_alive())
+                diagnostic.outcome("task", "completed", "completed")
+        log = payloads(records)[0]
+        self.assertEqual(log["summary"]["counts"]["thread_event"], 400)
+        sequences = [event["seq"] for event in log["events"]]
+        self.assertEqual(sequences, sorted(set(sequences)))
+        self.assertEqual(len(sequences), 256)
+
+    def test_emitter_failure_does_not_change_a_task_result(self):
+        with patch.object(trace.logger, "log", side_effect=RuntimeError("broken handler")):
+            run = self.run_task(
+                lambda request: httpx.Response(200, json={"status": True, "studyId": 7}),
+            )
+        self.assertIsNone(run["error"])
+        self.assertIsNone(run["result"])
+        self.assertEqual(run["study_waits"], [0, 30, 15])
+
+    def test_http_diagnostics_never_include_credentials_headers_bodies_or_query(self):
+        secrets = (
+            "private-query", "private-authorization", "private-header-cookie",
+            "private-request-body", "private-response-body", "private-study-id",
+            CREDENTIALS["username"], CREDENTIALS["password"], CAPTCHA,
+        )
+        response = httpx.Response(200, json={
+            "status": False, "studyId": "private-study-id", "need_code": 1,
+            "offline": 0, "code": CAPTCHA, "errorCode": CREDENTIALS["password"],
+            "message": "private-response-body " + CREDENTIALS["username"],
+        })
+        handler = Mock(return_value=response)
+        with captured_trace() as records:
+            with trace.task_trace(DOMAIN, TASK_ID) as diagnostic:
+                with StudyClient(
+                    "https://" + DOMAIN, transport=httpx.MockTransport(handler),
+                ) as client:
+                    actual = client.request(
+                        "POST", "/private-request-body?token=private-query", retry=False,
+                        headers={"Authorization": "private-authorization", "Cookie": "private-header-cookie"},
+                        data={"username": CREDENTIALS["username"], "password": CREDENTIALS["password"], "code": CAPTCHA},
+                    )
+                    self.assertIs(actual, response)
+                    self.assertFalse(json_object(actual)["status"])
+                diagnostic.anomaly("dump_for_test", "http")
+                diagnostic.outcome("task", "completed", "completed")
+        serialized = json.dumps(payloads(records))
+        for secret in secrets:
+            with self.subTest(secret=secret):
+                self.assertNotIn(secret, serialized)
+        self.assertIn("/[redacted]", serialized)
+
+    def test_http_retries_redirects_and_json_failures_are_retained(self):
+        seen = []
+        responses = [
+            httpx.ReadTimeout("private-timeout-message"),
+            httpx.Response(429, headers={"Retry-After": "3"}),
+            httpx.Response(503, headers={"Retry-After": "invalid"}),
+            httpx.Response(200, json={"status": True}),
+        ]
+
+        def handler(request):
+            seen.append(request.url.path)
+            if request.url.path == "/":
+                return httpx.Response(302, headers={"Location": "/user/?token=private-redirect-query"})
+            if request.url.path == "/user/":
+                return httpx.Response(200, text="private-response-body")
+            result = responses.pop(0)
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        sleep = Mock()
+        with captured_trace() as records:
+            with trace.task_trace(DOMAIN, TASK_ID) as diagnostic:
+                with StudyClient(
+                    "https://" + DOMAIN, transport=httpx.MockTransport(handler), sleep=sleep,
+                ) as client:
+                    self.assertEqual(json_object(client.post_online()), {"status": True})
+                    self.assertEqual(json_object(client.get_page()), {})
+                diagnostic.anomaly("dump_for_test", "http")
+                diagnostic.outcome("task", "completed", "completed")
+        self.assertEqual(seen, ["/user/online"] * 4 + ["/", "/user/"])
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [1, 3, 4])
+        log = payloads(records)[0]
+        self.assertEqual(log["summary"]["http"]["retries"], 3)
+        self.assertEqual(log["summary"]["http"]["redirects"], 1)
+        http_events = [event for event in log["events"] if event["event"] == "http_end"]
+        self.assertEqual([event["http_status"] for event in http_events], [None, 429, 503, 200, 200])
+        self.assertEqual(http_events[0]["exception_type"], "ReadTimeout")
+        self.assertEqual(http_events[0]["timeout_type"], "ReadTimeout")
+        self.assertEqual(http_events[-1]["redirect_statuses"], [302])
+        self.assertFalse(http_events[-1]["response"]["json_parsed"])
+        self.assertEqual(log["summary"]["request_windows"][0]["attempts"], 5)
+        self.assertEqual(log["summary"]["request_windows"][0]["http_429"], 1)
+        self.assertEqual(log["summary"]["request_windows"][0]["http_5xx"], 1)
+        self.assertNotIn("private-timeout-message", json.dumps(log))
+        self.assertNotIn("private-redirect-query", json.dumps(log))
+
 
 if __name__ == "__main__":
     unittest.main()

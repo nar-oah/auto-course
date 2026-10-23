@@ -6,12 +6,14 @@ from bs4 import BeautifulSoup
 
 from .http import StudyClient, json_object
 from .models import Course, Video
+from .trace import get_trace
 
 
 class VideoList:
     def __init__(self, client: StudyClient, threshold: float) -> None:
         self.client = client
         self.threshold = threshold
+        self.trace = get_trace(client)
 
     @staticmethod
     def _get_seconds(hms: str) -> int:
@@ -21,10 +23,13 @@ class VideoList:
     def _get_pages(self) -> int:
         response = self.client.request("GET", "/user/")
         if response is None:
+            self.trace.anomaly("course_pagination_unavailable", "catalog")
             return 0
         total = BeautifulSoup(response.text, "html.parser").find("div", class_="total")
         if total is not None and (match := re.search(r"/\s*(\d+)", total.get_text())):
+            self.trace.event("course_pages", pages=int(match.group(1)))
             return int(match.group(1))
+        self.trace.event("course_pagination_missing")
         return 0
 
     @staticmethod
@@ -54,11 +59,14 @@ class VideoList:
                 yield from (item for item in items if isinstance(item, dict))
 
     def get_videos(self) -> Iterator[Video]:
+        self.trace.event("catalog_start")
         for page in range(1, self._get_pages() + 1):
             response = self.client.request("GET", f"/user/index?page={page}")
             if response is None:
+                self.trace.anomaly("course_page_unavailable", "catalog", page=page)
                 continue
             for course in self._handle_courses(response.text):
+                self.trace.event("course_discovered", course=self.trace.token("course", course.id))
                 for item in self._get_video_items(course):
                     try:
                         progress = float(item.get("progress", 1))
@@ -67,7 +75,12 @@ class VideoList:
                         total = self._get_seconds(item.get("videoDuration", "00:00:00"))
                         watched = int(item.get("duration", 0))
                     except (ValueError, TypeError, AttributeError, OverflowError):
+                        self.trace.event("video_item_skipped", reason="invalid_duration_or_progress")
                         continue
+                    self.trace.event(
+                        "pending_video_discovered", video=self.trace.token("video", str(item.get("id", ""))),
+                        course=self.trace.token("course", course.id),
+                    )
                     yield Video(
                         name=str(item.get("name", "")),
                         id=str(item.get("id", "")),
@@ -76,3 +89,4 @@ class VideoList:
                         watched_duration=watched,
                         progress=progress,
                     )
+        self.trace.event("catalog_complete", counts_are_final=True)

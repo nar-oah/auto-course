@@ -321,11 +321,18 @@ class StudyTrace:
                 "exception_type": None if error is None else type(error).__name__,
                 "timeout_type": type(error).__name__ if error is not None and "Timeout" in type(error).__name__ else None,
                 "redirect_count": len(history), "redirect_statuses": history[:16],
+                "final_path": None if response is None else self._path(response.url),
+                "redirect_paths": [] if response is None else [self._path(r.url) for r in response.history[:16]],
                 "retry_after_present": response is not None and "Retry-After" in response.headers,
             }
+            self.http["json_parsed" if fields["response"].get("json_parsed") else "json_unparsed"] += 1
             record = self._record("http_end", fields)
             if token["path"] == "/user/online":
                 self.last_heartbeat = record
+            if error is not None or (status is not None and status >= 400):
+                self.anomaly("http_exception" if error is not None else "http_error_status", "http",
+                             request=token["request"], http_status=status,
+                             exception_type=None if error is None else type(error).__name__)
 
     @_guard()
     def retry(self, attempt, reason, delay, actual_wait=None, interrupted=False):
@@ -350,15 +357,15 @@ class StudyTrace:
                 "last_progress": self.last_progress, "last_heartbeat": self.last_heartbeat,
                 "events_total": self.counts["events_total"], "events_retained": len(self.events),
                 "events_dropped": max(0, self.counts["events_total"] - len(self.events)),
+                "courses_discovered": self.counts["course_discovered"],
+                "pending_videos_discovered": self.counts["pending_video_discovered"],
+                "catalog_complete": self.counts["catalog_complete"] > 0,
             }
             payload = {"type": "study_trace", "task_id": self.task_id, "domain": self.domain, "summary": summary}
             abnormal = self.first_anomaly is not None or self.result not in {"completed", "empty_video_list"}
             if abnormal:
                 payload["events"] = list(self.events)
-            # Credentials are scrubbed once more from the whole serialized envelope.
             output = json.dumps(payload, ensure_ascii=True, allow_nan=False, separators=(",", ":"))
-            for secret in self.secrets:
-                output = output.replace(json.dumps(secret, ensure_ascii=True)[1:-1], "[redacted]")
             logger.log(logging.WARNING if abnormal else logging.INFO, output)
 
 

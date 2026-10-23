@@ -373,6 +373,83 @@ class TraceTests(unittest.TestCase):
                 for key in ("requests", "study_waits", "http_waits", "result", "error"):
                     self.assertEqual(before[key], after[key], key)
 
+    def test_trace_on_preserves_empty_list_and_exception_behavior(self):
+        failure = ValueError("private failure that must reach the caller unchanged")
+
+        def fail(request):
+            raise failure
+
+        for videos, handler in (((), Mock()), ((VIDEO,), fail)):
+            with self.subTest(empty=not videos):
+                before = self.run_task(handler, enabled=None, videos=videos)
+                after = self.run_task(handler, videos=videos)
+                for key in ("requests", "study_waits", "http_waits", "result", "error"):
+                    self.assertEqual(before[key], after[key], key)
+                if videos:
+                    self.assertIs(before["error"], failure)
+                    self.assertIs(after["error"], failure)
+                    self.assertEqual(after["logs"][0]["summary"]["celery_return"], "raised")
+                else:
+                    self.assertTrue(after["logs"][0]["events"])
+                    handler.assert_not_called()
+
+    def assert_bounded_records(self, records):
+        self.assertTrue(records)
+        for record in records:
+            output = record.getMessage()
+            self.assertLessEqual(len(output.encode("ascii")), 8192)
+            self.assertIn(json.loads(output)["type"], ("study_trace", "study_trace_chunk"))
+
+    def test_large_events_and_summaries_are_chunked_and_restored_exactly(self):
+        # Quotes, slashes and non-ASCII text exercise both JSON-encoding layers.
+        fields = {f"field_{index}": '匿名\\"雪' * 30 for index in range(46)}
+        for location in ("event", "anomaly_summary", "normal_summary"):
+            with self.subTest(location=location):
+                with captured_trace() as records:
+                    with trace.task_trace(DOMAIN, TASK_ID) as diagnostic:
+                        if location == "anomaly_summary":
+                            diagnostic.anomaly("large_anomaly", "http", **fields)
+                        elif location == "normal_summary":
+                            diagnostic.last_heartbeat = diagnostic.event("large_heartbeat", **fields)
+                        else:
+                            diagnostic.event("large_event", **fields)
+                            diagnostic.anomaly("dump_for_test", "task")
+                        diagnostic.outcome("task", "completed", "completed")
+                self.assert_bounded_records(records)
+                self.assertGreater(len(records), 1)
+                envelopes = [json.loads(record.getMessage()) for record in records]
+                self.assertTrue(all(item["type"] == "study_trace_chunk" for item in envelopes))
+                self.assertEqual([item["chunk_index"] for item in envelopes], list(range(1, len(records) + 1)))
+                self.assertTrue(all(item["chunk_count"] == len(records) for item in envelopes))
+                self.assertTrue(all(item["task_id"] == TASK_ID and item["domain"] == DOMAIN for item in envelopes))
+                restored = payloads(list(reversed(records)))
+                self.assertEqual(restored, payloads(records))
+                self.assertEqual(len(restored), 1)
+                log = restored[0]
+                self.assertEqual(log["summary"]["first_anomaly"], diagnostic.first_anomaly)
+                self.assertEqual(log["summary"]["last_heartbeat"], diagnostic.last_heartbeat)
+                if location == "normal_summary":
+                    self.assertNotIn("events", log)
+                else:
+                    self.assertEqual(log["events"], list(diagnostic.events))
+                if location == "event":
+                    event = next(item for item in log["events"] if item["event"] == "large_event")
+                    for key, value in fields.items():
+                        self.assertEqual(event[key], value)
+
+    def test_summary_empty_list_and_exception_logs_all_obey_record_limit(self):
+        def fail(request):
+            raise ValueError("private failure")
+
+        cases = (
+            ((VIDEO,), lambda request: httpx.Response(200, json={"status": True, "studyId": 7})),
+            ((), Mock()),
+            ((VIDEO,), fail),
+        )
+        for videos, handler in cases:
+            with self.subTest(empty=not videos, handler=handler):
+                self.assert_bounded_records(self.run_task(handler, videos=videos)["records"])
+
     def test_bounded_events_keep_first_anomaly_and_task_statistics(self):
         with captured_trace() as records:
             with trace.task_trace(DOMAIN, TASK_ID) as diagnostic:
@@ -418,6 +495,26 @@ class TraceTests(unittest.TestCase):
         self.assertIsNone(run["error"])
         self.assertIsNone(run["result"])
         self.assertEqual(run["study_waits"], [0, 30, 15])
+
+    def test_handler_failure_does_not_change_requests_waits_or_exception(self):
+        failure = RuntimeError("private business exception")
+
+        def fail(request):
+            raise failure
+
+        for handler in (lambda request: httpx.Response(200, json={"status": False}), fail):
+            with self.subTest(handler=handler):
+                before = self.run_task(handler, enabled=None)
+                broken_handler = logging.Handler()
+                broken_handler.emit = Mock(side_effect=ValueError("broken diagnostic output"))
+                trace.logger.addHandler(broken_handler)
+                try:
+                    after = self.run_task(handler)
+                finally:
+                    trace.logger.removeHandler(broken_handler)
+                broken_handler.emit.assert_called()
+                for key in ("requests", "study_waits", "http_waits", "result", "error"):
+                    self.assertEqual(before[key], after[key], key)
 
     def test_collection_failure_does_not_change_requests_or_waits(self):
         def handler(request):

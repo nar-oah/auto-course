@@ -392,6 +392,10 @@ class TraceTests(unittest.TestCase):
         self.assertEqual(len(run["logs"]), 1)
         log = run["logs"][0]
         self.assertIsNotNone(log["summary"]["first_anomaly"])
+        self.assertEqual(log["summary"]["first_anomaly"]["exception_type"], "ValueError")
+        self.assertEqual(log["summary"]["last_study_request"]["exception_type"], "ValueError")
+        self.assertEqual(log["summary"]["result"], "exception")
+        self.assertEqual(log["summary"]["celery_return"], "raised")
         self.assertTrue(log["events"])
         serialized = json.dumps(log)
         self.assertNotIn("private-password", serialized)
@@ -451,10 +455,16 @@ class TraceTests(unittest.TestCase):
     def test_large_events_and_summaries_are_chunked_and_restored_exactly(self):
         # Quotes, slashes and non-ASCII text exercise both JSON-encoding layers.
         fields = {f"field_{index}": '匿名\\"雪' * 30 for index in range(46)}
-        for location in ("event", "anomaly_summary", "normal_summary"):
-            with self.subTest(location=location):
+        cases = (
+            ("event", TASK_ID, DOMAIN),
+            ("anomaly_summary", TASK_ID, DOMAIN),
+            ("normal_summary", TASK_ID, DOMAIN),
+            ("event", '雪"\\\n' * 32, "雪" * 253),
+        )
+        for location, task_id, domain in cases:
+            with self.subTest(location=location, task_id=task_id):
                 with captured_trace() as records:
-                    with trace.task_trace(DOMAIN, TASK_ID) as diagnostic:
+                    with trace.task_trace(domain, task_id) as diagnostic:
                         if location == "anomaly_summary":
                             diagnostic.anomaly("large_anomaly", "http", **fields)
                         elif location == "normal_summary":
@@ -469,7 +479,7 @@ class TraceTests(unittest.TestCase):
                 self.assertTrue(all(item["type"] == "study_trace_chunk" for item in envelopes))
                 self.assertEqual([item["chunk_index"] for item in envelopes], list(range(1, len(records) + 1)))
                 self.assertTrue(all(item["chunk_count"] == len(records) for item in envelopes))
-                self.assertTrue(all(item["task_id"] == TASK_ID and item["domain"] == DOMAIN for item in envelopes))
+                self.assertTrue(all(item["task_id"] == task_id and item["domain"] == domain for item in envelopes))
                 restored = payloads(list(reversed(records)))
                 self.assertEqual(restored, payloads(records))
                 self.assertEqual(len(restored), 1)

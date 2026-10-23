@@ -209,6 +209,11 @@ class StudyTrace:
         valid = (isinstance(value, int) and not isinstance(value, bool) and value >= 0) or (
             isinstance(value, str) and value.isdecimal()
         )
+        if valid and isinstance(value, str):
+            try:
+                int(value)
+            except ValueError:
+                valid = False
         return {"present": present, "type": type(value).__name__, "valid": valid,
                 "ref": self.token("study", value) if valid else None,
                 "zero": valid and str(value).strip("0") == ""}
@@ -369,7 +374,9 @@ class StudyTrace:
             if not self.request_windows or self.request_windows[-1]["minute"] != minute:
                 self.request_windows.append({"minute": minute, "started_at": token["started_at"], "attempts": 0, "errors": 0, "http_429": 0, "http_5xx": 0})
             self.request_windows[-1]["attempts"] += 1
-            self._record("http_start", {k: v for k, v in token.items() if k != "started"})
+            # A failed event write must still return the token so http_end can
+            # remove the in-flight request and keep auxiliary memory bounded.
+            self.event("http_start", **{k: v for k, v in token.items() if k != "started"})
             return token
 
     @_guard()

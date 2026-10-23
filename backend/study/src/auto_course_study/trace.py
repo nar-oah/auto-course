@@ -22,6 +22,7 @@ from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
 CAPACITY = 256
+MAX_LOG_BYTES = 8192
 _PATHS = frozenset({
     "/", "/user/", "/user/index", "/user/login", "/user/online",
     "/user/node/study", "/user/study_record.json", "/service/code",
@@ -31,6 +32,23 @@ _BUSINESS_WORDS = frozenset({
     "true", "false", "success", "failure", "failed", "error", "ok",
     "denied", "rejected", "offline", "unauthorized", "forbidden",
 })
+_MESSAGE_FIELDS = (
+    "message", "msg", "error", "error_message", "errorMessage", "detail",
+    "errmsg", "errorMsg",
+)
+
+
+class _StudyHttpxFilter(logging.Filter):
+    def filter(self, record):
+        # Read the flag for each record, including records from the existing
+        # heartbeat thread. Never change application logger levels or handlers.
+        try:
+            return record.levelno != logging.INFO or os.getenv("STUDY_TRACE") != "1"
+        except Exception:
+            return True
+
+
+logging.getLogger("httpx").addFilter(_StudyHttpxFilter())
 
 
 def _guard(default=None):
@@ -143,6 +161,8 @@ class StudyTrace:
 
     def _record(self, name, fields):
         self.counts[name] += 1
+        if name == "catalog_issue":
+            self.counts[f"catalog_issue:{fields['reason']}"] += 1
         self.counts["events_total"] += 1
         record = {
             "event": name, "seq": self.counts["events_total"], "at": self._utc(),
@@ -283,6 +303,10 @@ class StudyTrace:
         # even if the server converts them to integers.
         if isinstance(data.get("code"), int) and not isinstance(data["code"], bool):
             fields["code"] = self._business_value(data["code"])
+        for name in _MESSAGE_FIELDS:
+            fields[name] = {"present": name in data}
+            if name in data:
+                fields[name].update(type=type(data[name]).__name__, ref=self.token("message", data[name]))
         fields["studyId"] = self.study_id(data.get("studyId"), present="studyId" in data)
         return fields
 
@@ -452,6 +476,35 @@ class StudyTrace:
             self._record("http_retry", {**metadata, "retry": attempt, "reason": reason, "planned_wait": delay,
                                        "actual_wait": actual_wait, "interrupted": interrupted})
 
+    def _emit(self, payload, level):
+        output = json.dumps(payload, ensure_ascii=True, allow_nan=False, separators=(",", ":"))
+        if len(output) <= MAX_LOG_BYTES:
+            logger.log(level, output)
+            return
+        envelope = {
+            "type": "study_trace_chunk", "task_id": self.task_id, "domain": self.domain,
+            "chunk_index": len(output), "chunk_count": len(output),
+            "encoding": "json_fragment", "data": "",
+        }
+        # Serialized payloads are ASCII. Each character takes at most two bytes
+        # when escaped inside the envelope. Reserve space for the largest index
+        # and count so even a single oversized event/summary can be split safely.
+        overhead = len(json.dumps(envelope, ensure_ascii=True, separators=(",", ":")))
+        fragment_size = (MAX_LOG_BYTES - overhead) // 2
+        chunk_count = (len(output) + fragment_size - 1) // fragment_size
+        for index in range(chunk_count):
+            envelope.update(
+                chunk_index=index + 1, chunk_count=chunk_count,
+                data=output[index * fragment_size:(index + 1) * fragment_size],
+            )
+            message = json.dumps(envelope, ensure_ascii=True, separators=(",", ":"))
+            try:
+                logger.log(level, message)
+            except Exception:
+                # A broken handler must not change study behavior or prevent
+                # attempts to emit the remaining chunks.
+                pass
+
     @_guard()
     def finish(self, celery_return="returned"):
         with self.lock:
@@ -459,6 +512,12 @@ class StudyTrace:
                 return
             self.finished = True
             self._record("task_end", {"stage": self.final_stage, "reason": self.reason, "result": self.result})
+            catalog_issues = {
+                key.removeprefix("catalog_issue:"): value
+                for key, value in self.counts.items() if key.startswith("catalog_issue:")
+            }
+            catalog_complete = self.counts["catalog_complete"] > 0
+            catalog_reliable = catalog_complete and not catalog_issues
             summary = {
                 "started_at": self.started_at, "ended_at": self._utc(),
                 "duration_seconds": self.elapsed(self.started), "final_stage": self.final_stage,
@@ -471,16 +530,21 @@ class StudyTrace:
                 "events_dropped": max(0, self.counts["events_total"] - len(self.events)),
                 "courses_discovered": self.counts["course_discovered"],
                 "pending_videos_discovered": self.counts["pending_video_discovered"],
-                "catalog_complete": self.counts["catalog_complete"] > 0,
+                "catalog_complete": catalog_complete,
+                "catalog_reliable": catalog_reliable,
+                "catalog_issue_counts": catalog_issues,
+                "empty_video_list_reason": (
+                    "catalog_incomplete_or_invalid" if catalog_issues else
+                    "no_pending_videos" if catalog_reliable else "catalog_not_observed"
+                ) if self.result == "empty_video_list" else None,
                 "videos_started": self.counts["video_start"],
                 "videos_ended": self.counts["video_end"],
             }
             payload = {"type": "study_trace", "task_id": self.task_id, "domain": self.domain, "summary": summary}
             abnormal = self.first_anomaly is not None or self.result not in {"completed", "empty_video_list"}
-            if abnormal:
+            if abnormal or self.result == "empty_video_list":
                 payload["events"] = list(self.events)
-            output = json.dumps(payload, ensure_ascii=True, allow_nan=False, separators=(",", ":"))
-            logger.log(logging.WARNING if abnormal else logging.INFO, output)
+            self._emit(payload, logging.WARNING if abnormal else logging.INFO)
 
 
 _DISABLED = StudyTrace("unknown", None, enabled=False)

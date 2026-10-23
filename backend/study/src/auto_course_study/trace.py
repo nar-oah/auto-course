@@ -8,6 +8,7 @@ from collections import Counter, deque
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from functools import wraps
 import hashlib
 import json
@@ -288,6 +289,35 @@ class StudyTrace:
         path = urlsplit(str(local)).path
         return path if path in _PATHS else "/[redacted]"
 
+    @_guard({})
+    def _retry_after_details(self, response):
+        """Describe the header without retaining its text or deciding any wait."""
+        value = None if response is None else response.headers.get("Retry-After")
+        if value is None:
+            return {"present": False}
+        try:
+            seconds = float(value)
+        except (ValueError, TypeError, OverflowError):
+            try:
+                retry_at = parsedate_to_datetime(value)
+                if retry_at.tzinfo is None:
+                    retry_at = retry_at.replace(tzinfo=timezone.utc)
+                retry_at = retry_at.astimezone(timezone.utc)
+                delay = (retry_at - datetime.now(timezone.utc)).total_seconds()
+                return {
+                    "present": True, "format": "http_date",
+                    "at": retry_at.isoformat().replace("+00:00", "Z"),
+                    "delay_seconds": max(0.0, delay),
+                }
+            except (ValueError, TypeError, OverflowError):
+                return {"present": True, "format": "invalid"}
+        if not math.isfinite(seconds):
+            return {"present": True, "format": "invalid"}
+        return {
+            "present": True, "format": "delta_seconds", "seconds": seconds,
+            "delay_seconds": max(0.0, seconds),
+        }
+
     @_guard()
     def http_start(self, method, local):
         with self.lock:
@@ -340,6 +370,7 @@ class StudyTrace:
                 "final_path": None if response is None else self._path(response.url),
                 "redirect_paths": [] if response is None else [self._path(r.url) for r in response.history[:16]],
                 "retry_after_present": response is not None and "Retry-After" in response.headers,
+                "retry_after": self._retry_after_details(response),
             }
             self.http["json_parsed" if fields["response"].get("json_parsed") else "json_unparsed"] += 1
             record = self._record("http_end", fields)

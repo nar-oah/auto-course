@@ -64,6 +64,7 @@ class CourseBot:
 
                 self.ocr = ddddocr.DdddOcr(show_ad=False)
             code = self.ocr.classification(response.content)
+            self.trace.protect(code)
             self.trace.event(
                 "captcha_result", acquired=True,
                 ocr_result=isinstance(code, str) and bool(code),
@@ -121,10 +122,13 @@ class CourseBot:
                     heartbeat_video=self.trace.token("video", self._trace_video_id),
                 ):
                     response = self.client.post_online(stop=stop)
+                response_details = self.trace.response(response)
                 self.trace.event(
                     "heartbeat_result", duration=self.trace.elapsed(started),
-                    response=self.trace.response(response),
+                    response=response_details,
                 )
+                if response_details.get("status") is False or response_details.get("offline") == 1:
+                    self.trace.anomaly("heartbeat_business_rejected", "heartbeat")
                 stop.wait(self.config.online_interval)
         except Exception as exc:
             exit_reason = "exception"
@@ -161,19 +165,39 @@ class CourseBot:
 
     def _submit_progress(self, info: StudyInfo) -> int | None:
         self._trace_abort_result = ("progress_rejected", "progress_aborted")
-        submission = self.trace.progress_start(info, kind="normal", cause=self._trace_retry_cause, **self._trace_progress_context)
-        with self.trace.context(request_kind="progress", progress_id=submission, submission_kind="normal"):
-            response = self.client.post_study(info)
+        submission = self.trace.progress_start(
+            info, kind="normal", cause=self._trace_retry_cause,
+            **self._trace_progress_context,
+        )
+        try:
+            with self.trace.context(
+                request_kind="progress", progress_id=self.trace.progress_ref(submission),
+                submission_kind="normal",
+            ):
+                response = self.client.post_study(info)
+        except Exception as exc:
+            self.trace.progress_end(submission, decision="exception", confirmed=False)
+            self.trace.anomaly(
+                "progress_exception", "progress", exception_type=type(exc).__name__
+            )
+            raise
         try:
             data = self._progress_data(response)
         except StudyAborted:
-            self.trace.progress_end(submission, response=response, decision="exit_http_rejected", confirmed=False)
+            self.trace.progress_end(
+                submission, response=response,
+                decision="exit_http_rejected", confirmed=False,
+            )
             self._trace_abort_result = ("progress_rejected", "http_rejected")
             self.trace.anomaly("http_rejected", "progress")
             self.trace.outcome("progress", "http_rejected", "progress_rejected")
             raise
         if data.get("status") is not True and data.get("need_code", 0) == 1:
-            self.trace.progress_end(submission, response=response, data=data, decision="captcha_supplement", confirmed=False)
+            self.trace.progress_end(
+                submission, response=response, data=data,
+                decision="captcha_supplement", confirmed=False,
+            )
+            self.trace.anomaly("captcha_required", "progress_captcha")
             code = self.recognize_captcha("/service/code/aa")
             if not code:
                 self._trace_abort_result = ("progress_unconfirmed", "captcha_unavailable")
@@ -182,26 +206,53 @@ class CourseBot:
                 raise StudyAborted("Unable to recover the progress captcha")
             # A captcha permits one supplement of this payload. Its response must
             # confirm a studyId before the loop can treat it as accepted.
-            submission = self.trace.progress_start(info, kind="captcha", next_time=self._trace_progress_context.get("next_time"), failures=self._trace_progress_context.get("failures"), actual_wait=0, cause="captcha")
-            with self.trace.context(request_kind="progress", progress_id=submission, submission_kind="captcha"):
-                response = self.client.post_study(info, code)
+            submission = self.trace.progress_start(
+                info, kind="captcha",
+                next_time=self._trace_progress_context.get("next_time"),
+                failures=self._trace_progress_context.get("failures"),
+                actual_wait=0, cause="captcha",
+            )
+            try:
+                with self.trace.context(
+                    request_kind="progress",
+                    progress_id=self.trace.progress_ref(submission),
+                    submission_kind="captcha",
+                ):
+                    response = self.client.post_study(info, code)
+            except Exception as exc:
+                self.trace.progress_end(submission, decision="exception", confirmed=False)
+                self.trace.anomaly(
+                    "progress_exception", "progress_captcha",
+                    exception_type=type(exc).__name__,
+                )
+                raise
             try:
                 data = self._progress_data(response)
             except StudyAborted:
-                self.trace.progress_end(submission, response=response, decision="exit_http_rejected", confirmed=False)
+                self.trace.progress_end(
+                    submission, response=response,
+                    decision="exit_http_rejected", confirmed=False,
+                )
                 self._trace_abort_result = ("progress_rejected", "captcha_http_rejected")
                 self.trace.anomaly("captcha_http_rejected", "progress_captcha")
                 self.trace.outcome("progress_captcha", "captcha_http_rejected", "progress_rejected")
                 raise
         if data.get("status") is True:
             study_id = self._study_id(data)
-            self.trace.progress_end(submission, response=response, data=data, decision="confirmed" if study_id is not None else "retry_invalid_study_id", confirmed=study_id is not None)
+            self.trace.progress_end(
+                submission, response=response, data=data,
+                decision="confirmed" if study_id is not None else "retry_invalid_study_id",
+                confirmed=study_id is not None,
+            )
             self._trace_retry_cause = "scheduled" if study_id is not None else "invalid_study_id"
             if study_id is None:
                 self.trace.anomaly("invalid_study_id", "progress")
             return study_id
         if data.get("offline", 0) == 1:
-            self.trace.progress_end(submission, response=response, data=data, decision="restore_login", confirmed=False)
+            self.trace.progress_end(
+                submission, response=response, data=data,
+                decision="restore_login", confirmed=False,
+            )
             self._trace_login_phase = "recovery"
             try:
                 logged_in = self.login()
@@ -218,17 +269,26 @@ class CourseBot:
             self.trace.anomaly("progress_offline", "progress")
             return None
         if data.get("need_code", 0) == 1:
-            self.trace.progress_end(submission, response=response, data=data, decision="retry_captcha_unconfirmed", confirmed=False)
+            self.trace.progress_end(
+                submission, response=response, data=data,
+                decision="retry_captcha_unconfirmed", confirmed=False,
+            )
             self._trace_retry_cause = "captcha_unconfirmed"
             self.trace.anomaly("captcha_unconfirmed", "progress_captcha")
             return None
         if data.get("status") is False:
-            self.trace.progress_end(submission, response=response, data=data, decision="exit_business_rejected", confirmed=False)
+            self.trace.progress_end(
+                submission, response=response, data=data,
+                decision="exit_business_rejected", confirmed=False,
+            )
             self._trace_abort_result = ("progress_rejected", "business_rejected")
             self.trace.anomaly("business_rejected", "progress")
             self.trace.outcome("progress", "business_rejected", "progress_rejected")
             raise StudyAborted("Progress submission was rejected")
-        self.trace.progress_end(submission, response=response, data=data, decision="retry_unconfirmed", confirmed=False)
+        self.trace.progress_end(
+            submission, response=response, data=data,
+            decision="retry_unconfirmed", confirmed=False,
+        )
         self._trace_retry_cause = "unconfirmed"
         self.trace.anomaly("progress_unconfirmed", "progress")
         return None

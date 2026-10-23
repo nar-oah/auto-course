@@ -363,6 +363,27 @@ class TraceTests(unittest.TestCase):
         self.assertIsNone(run["result"])
         self.assertEqual(run["study_waits"], [0, 30, 15])
 
+    def test_collection_failure_does_not_change_requests_or_waits(self):
+        def handler(request):
+            return httpx.Response(200, json={"status": True, "studyId": 7})
+
+        before = self.run_task(handler, enabled=None)
+        with patch.object(trace.StudyTrace, "_record", side_effect=RuntimeError("broken collector")):
+            after = self.run_task(handler)
+        for key in ("requests", "study_waits", "http_waits", "result", "error"):
+            self.assertEqual(before[key], after[key], key)
+
+    def test_short_numeric_credentials_cannot_corrupt_structured_json(self):
+        log = self.only_log(self.run_task(
+            lambda request: httpx.Response(200, json={"status": False, "errorCode": "17"}),
+            credentials={"username": "1", "password": "7"},
+        ))
+        self.assertEqual(log["type"], "study_trace")
+        self.assertEqual(log["summary"]["last_progress"]["studyTime"], 1)
+        self.assertEqual(log["summary"]["last_progress"]["response"]["http_status"], 200)
+        self.assertFalse(log["summary"]["last_progress"]["response"]["status"])
+        self.assertNotEqual(log["summary"]["last_progress"]["response"]["errorCode"], "17")
+
     def test_http_diagnostics_never_include_credentials_headers_bodies_or_query(self):
         secrets = (
             "private-query", "private-authorization", "private-header-cookie",

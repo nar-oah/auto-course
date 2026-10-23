@@ -272,7 +272,13 @@ class StudyTrace:
             return fields
         for name in ("status", "need_code", "offline", "error_code", "errorCode", "errcode", "errno", "resultCode"):
             if name in data:
-                fields[name] = self._business_value(data[name])
+                value = data[name]
+                if name in {"status", "need_code", "offline"} and type(value) in {bool, int} and value in {0, 1}:
+                    # Protocol flags must stay readable even for one-digit
+                    # credentials; other server values still undergo scrubbing.
+                    fields[name] = value
+                else:
+                    fields[name] = self._business_value(value)
         # A generic 'code' can be an echoed captcha. Known OCR values are scrubbed
         # even if the server converts them to integers.
         if isinstance(data.get("code"), int) and not isinstance(data["code"], bool):

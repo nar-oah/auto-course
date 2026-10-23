@@ -106,15 +106,14 @@ class StudyTrace:
     def _clean(self, value, depth=0):
         if depth > 6:
             return "[depth limit]"
-        if isinstance(value, int) and not isinstance(value, bool) and str(value) in self.secrets:
-            return "[redacted]"
         if value is None or isinstance(value, (bool, int)):
             return value
         if isinstance(value, float):
             return round(value, 6) if math.isfinite(value) else str(value)
         if isinstance(value, str):
-            for secret in self.secrets:
-                value = value.replace(secret, "[redacted]")
+            # Callers supply diagnostic enums, anonymous references and UTC times.
+            # Scrubbing these by substring would corrupt correlation/time fields
+            # for short credentials. Server-derived values use _business_value.
             return value[:160]
         if isinstance(value, dict):
             return {str(k)[:64]: self._clean(v, depth + 1) for k, v in list(value.items())[:48]}
@@ -205,6 +204,8 @@ class StudyTrace:
                 "zero": valid and str(value).strip("0") == ""}
 
     def _business_value(self, value):
+        if isinstance(value, (int, str)) and not isinstance(value, bool) and str(value) in self.secrets:
+            return "[redacted]"
         if value is None or isinstance(value, (bool, int)):
             return self._clean(value)
         if isinstance(value, float):

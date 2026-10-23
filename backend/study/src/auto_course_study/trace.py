@@ -64,6 +64,7 @@ class StudyTrace:
         self.request_windows = deque(maxlen=32)
         self.active_requests = {}
         self.request_sequence = 0
+        self.call_sequence = 0
         self.progress_sequence = 0
         self.video_sequence = 0
         self.video = None
@@ -296,6 +297,24 @@ class StudyTrace:
         path = urlsplit(str(local)).path
         return path if path in _PATHS else "/[redacted]"
 
+    @_guard("/[redacted]")
+    def path(self, local):
+        return self._path(local)
+
+    @_guard()
+    def http_call(self):
+        with self.lock:
+            self.call_sequence += 1
+            self.http["calls"] += 1
+            return self.call_sequence
+
+    def _response_path(self, response, fallback):
+        try:
+            return self._path(response.url)
+        except Exception:
+            # A standalone mocked Response need not have an attached Request.
+            return fallback
+
     @_guard({})
     def _retry_after_details(self, response):
         """Describe the header without retaining its text or deciding any wait."""
@@ -326,13 +345,14 @@ class StudyTrace:
         }
 
     @_guard()
-    def http_start(self, method, local):
+    def http_start(self, method, local, *, call_id=None, attempt=None, retry_enabled=None):
         with self.lock:
             self.request_sequence += 1
             now = time.monotonic()
             path = self._path(local)
             token = {"request": self.request_sequence, "method": method if method in {"GET", "POST", "PUT", "DELETE", "HEAD", "PATCH", "OPTIONS"} else "OTHER",
-                     "path": path, "started": now, "started_at": self._utc(), "video": self.video,
+                     "path": path, "call_id": call_id, "attempt": attempt, "retry_enabled": retry_enabled,
+                     "started": now, "started_at": self._utc(), "video": self.video,
                      **getattr(self.local, "context", {}), "overlaps": []}
             for active in self.active_requests.values():
                 if {path, active["path"]} == {"/user/online", "/user/node/study"}:
@@ -374,8 +394,8 @@ class StudyTrace:
                 "exception_type": None if error is None else type(error).__name__,
                 "timeout_type": type(error).__name__ if error is not None and "Timeout" in type(error).__name__ else None,
                 "redirect_count": len(history), "redirect_statuses": history[:16],
-                "final_path": None if response is None else self._path(response.url),
-                "redirect_paths": [] if response is None else [self._path(r.url) for r in response.history[:16]],
+                "final_path": None if response is None else self._response_path(response, token["path"]),
+                "redirect_paths": [] if response is None else [self._response_path(r, "/[redacted]") for r in response.history[:16]],
                 "retry_after_present": response is not None and "Retry-After" in response.headers,
                 "retry_after": self._retry_after_details(response),
             }
@@ -392,10 +412,11 @@ class StudyTrace:
                              exception_type=None if error is None else type(error).__name__)
 
     @_guard()
-    def retry(self, attempt, reason, delay, actual_wait=None, interrupted=False):
+    def retry(self, attempt, reason, delay, actual_wait=None, interrupted=False, *, request=None):
         with self.lock:
             self.http["retries"] += 1
-            self._record("http_retry", {"retry": attempt, "reason": reason, "planned_wait": delay,
+            metadata = {key: request[key] for key in ("request", "call_id", "path", "attempt", "video") if key in request} if isinstance(request, dict) else {}
+            self._record("http_retry", {**metadata, "retry": attempt, "reason": reason, "planned_wait": delay,
                                        "actual_wait": actual_wait, "interrupted": interrupted})
 
     @_guard()

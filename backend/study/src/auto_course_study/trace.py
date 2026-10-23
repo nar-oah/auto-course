@@ -70,6 +70,7 @@ class StudyTrace:
         self.previous_progress = None
         self.first_anomaly = None
         self.last_progress = None
+        self.last_study_request = None
         self.last_heartbeat = None
         self.final_stage = "task"
         self.reason = "returned_without_confirmed_outcome"
@@ -143,7 +144,9 @@ class StudyTrace:
         with self.lock:
             record = self._record("anomaly", {"reason": reason, "stage": stage, **fields})
             if self.first_anomaly is None:
-                self.first_anomaly = record
+                self.first_anomaly = {**record, "last_progress": self.last_progress,
+                                      "last_study_request": self.last_study_request,
+                                      "last_heartbeat": self.last_heartbeat}
 
     @_guard()
     def outcome(self, stage, reason, result):
@@ -342,9 +345,12 @@ class StudyTrace:
             record = self._record("http_end", fields)
             if token["path"] == "/user/online":
                 self.last_heartbeat = record
+            elif token["path"] == "/user/node/study":
+                self.last_study_request = record
             if error is not None or (status is not None and status >= 400):
                 self.anomaly("http_exception" if error is not None else "http_error_status", "http",
                              request=token["request"], http_status=status,
+                             response=fields["response"], disposition=disposition,
                              exception_type=None if error is None else type(error).__name__)
 
     @_guard()
@@ -368,6 +374,7 @@ class StudyTrace:
                 "first_anomaly": self.first_anomaly, "counts": dict(self.counts),
                 "http": dict(self.http), "request_windows": list(self.request_windows),
                 "last_progress": self.last_progress, "last_heartbeat": self.last_heartbeat,
+                "last_study_request": self.last_study_request,
                 "events_total": self.counts["events_total"], "events_retained": len(self.events),
                 "events_dropped": max(0, self.counts["events_total"] - len(self.events)),
                 "courses_discovered": self.counts["course_discovered"],

@@ -76,7 +76,8 @@ class StudyTrace:
         self.final_stage = "task"
         self.reason = "returned_without_confirmed_outcome"
         self.result = "early_return"
-        self.secrets = set()
+        self.secrets = deque(maxlen=16)
+        self.credential_secrets = ()
         self.finished = False
         self.event("task_start")
 
@@ -103,7 +104,11 @@ class StudyTrace:
     @_guard()
     def protect(self, *values):
         with self.lock:
-            self.secrets.update(v for v in values if isinstance(v, str) and v)
+            values = tuple(v for v in values if isinstance(v, str) and v)
+            if len(values) > 1:
+                self.credential_secrets = values[:2]
+            else:
+                self.secrets.extend(values)
 
     def _clean(self, value, depth=0):
         if depth > 6:
@@ -208,8 +213,10 @@ class StudyTrace:
                 "zero": valid and str(value).strip("0") == ""}
 
     def _business_value(self, value):
+        with self.lock:
+            secrets = self.credential_secrets + tuple(self.secrets)
         if isinstance(value, (int, str)) and not isinstance(value, bool) and any(
-            secret in str(value) for secret in tuple(self.secrets)
+            secret in str(value) for secret in secrets
         ):
             return "[redacted]"
         if value is None or isinstance(value, (bool, int)):

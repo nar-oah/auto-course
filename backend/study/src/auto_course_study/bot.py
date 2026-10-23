@@ -184,6 +184,7 @@ class CourseBot:
             self.trace.anomaly(
                 "progress_exception", "progress", exception_type=type(exc).__name__
             )
+            self.trace.outcome("progress", "progress_exception", "exception")
             raise
         try:
             data = self._progress_data(response)
@@ -238,6 +239,7 @@ class CourseBot:
                     "progress_exception", "progress_captcha",
                     exception_type=type(exc).__name__,
                 )
+                self.trace.outcome("progress_captcha", "progress_exception", "exception")
                 raise
             try:
                 data = self._progress_data(response)

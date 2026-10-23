@@ -545,6 +545,25 @@ class TraceTests(unittest.TestCase):
         self.assertEqual(sequences, sorted(set(sequences)))
         self.assertEqual(len(sequences), 256)
 
+    def test_empty_list_keeps_catalog_failure_reason_after_buffer_eviction(self):
+        with captured_trace() as records:
+            with trace.task_trace(DOMAIN, TASK_ID) as diagnostic:
+                diagnostic.event("catalog_issue", reason="course_page_unavailable")
+                diagnostic.anomaly("course_page_unavailable", "catalog")
+                for index in range(400):
+                    diagnostic.event("later_catalog_event", index=index)
+                diagnostic.event("catalog_complete", counts_are_final=True)
+                diagnostic.outcome("video_list", "empty_video_list", "empty_video_list")
+        log = payloads(records)[0]
+        self.assertEqual(len(log["events"]), trace.CAPACITY)
+        self.assertFalse(any(event["event"] == "catalog_issue" for event in log["events"]))
+        summary = log["summary"]
+        self.assertTrue(summary["catalog_complete"])
+        self.assertFalse(summary["catalog_reliable"])
+        self.assertEqual(summary["catalog_issue_counts"], {"course_page_unavailable": 1})
+        self.assertEqual(summary["empty_video_list_reason"], "catalog_incomplete_or_invalid")
+        self.assertEqual(summary["first_anomaly"]["reason"], "course_page_unavailable")
+
     def test_emitter_failure_does_not_change_a_task_result(self):
         with patch.object(trace.logger, "log", side_effect=RuntimeError("broken handler")):
             run = self.run_task(

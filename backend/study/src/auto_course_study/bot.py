@@ -257,6 +257,7 @@ class CourseBot:
                 submission, response=response, data=data,
                 decision="restore_login", confirmed=False,
             )
+            self.trace.anomaly("progress_offline", "progress")
             self._trace_login_phase = "recovery"
             try:
                 logged_in = self.login()
@@ -270,7 +271,6 @@ class CourseBot:
             # Login restores cookies, not confirmation of the previous progress.
             # The next submission belongs to the next timed loop iteration.
             self._trace_retry_cause = "relogin"
-            self.trace.anomaly("progress_offline", "progress")
             return None
         if data.get("need_code", 0) == 1:
             self.trace.progress_end(

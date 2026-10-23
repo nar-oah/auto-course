@@ -7,11 +7,11 @@ import unittest
 from unittest.mock import Mock, patch
 from urllib.parse import parse_qs
 
-from auto_course_contracts import Credentials
 import httpx
 
 from auto_course_study import tasks, trace
 from auto_course_study.bot import CourseBot
+from auto_course_study.catalog import VideoList
 from auto_course_study.http import StudyClient, json_object
 from auto_course_study.models import Config, Course, StudyInfo, Video
 
@@ -375,14 +375,53 @@ class TraceTests(unittest.TestCase):
 
     def test_short_numeric_credentials_cannot_corrupt_structured_json(self):
         log = self.only_log(self.run_task(
-            lambda request: httpx.Response(200, json={"status": False, "errorCode": "17"}),
+            lambda request: httpx.Response(200, json={"status": False, "errorCode": "7"}),
             credentials={"username": "1", "password": "7"},
         ))
         self.assertEqual(log["type"], "study_trace")
         self.assertEqual(log["summary"]["last_progress"]["studyTime"], 1)
         self.assertEqual(log["summary"]["last_progress"]["response"]["http_status"], 200)
         self.assertFalse(log["summary"]["last_progress"]["response"]["status"])
-        self.assertNotEqual(log["summary"]["last_progress"]["response"]["errorCode"], "17")
+        self.assertEqual(log["summary"]["last_progress"]["response"]["errorCode"], "[redacted]")
+        video = next(event for event in log["events"] if event["event"] == "video_start")["video"]
+        self.assertEqual(log["summary"]["last_progress"]["video"], video)
+        self.assertTrue(all(
+            event["started_at"].endswith("Z") and "[redacted]" not in event["started_at"]
+            for event in log["events"] if "started_at" in event
+        ))
+
+    def test_catalog_counts_are_final_only_after_lazy_video_traversal(self):
+        def handler(request):
+            if request.url.path == "/user/":
+                return httpx.Response(200, text='<div class="total">1 / 1</div>')
+            if request.url.path == "/user/index":
+                return httpx.Response(200, text='<div class="name"><a href="/user/course?courseId=123">Private course</a></div>')
+            self.assertEqual(request.url.path, "/user/study_record.json")
+            return httpx.Response(200, json={
+                "pageInfo": {"pageCount": 1},
+                "list": [
+                    {"id": "video-a", "name": "Private title", "progress": .5, "videoDuration": "00:01:00", "duration": 10},
+                    {"id": "video-b", "progress": 0, "videoDuration": "00:02:00"},
+                    {"id": "finished", "progress": 1},
+                ],
+            })
+
+        for complete in (False, True):
+            with self.subTest(complete=complete):
+                with captured_trace() as records:
+                    with trace.task_trace(DOMAIN, TASK_ID) as diagnostic:
+                        with StudyClient("https://" + DOMAIN, transport=httpx.MockTransport(handler)) as client:
+                            videos = VideoList(client, .91).get_videos()
+                            self.assertEqual(next(videos).id, "video-a")
+                            if complete:
+                                self.assertEqual([video.id for video in videos], ["video-b"])
+                            else:
+                                videos.close()
+                        diagnostic.outcome("video_list", "traversal_completed", "completed")
+                summary = payloads(records)[0]["summary"]
+                self.assertEqual(summary["courses_discovered"], 1)
+                self.assertEqual(summary["pending_videos_discovered"], 2 if complete else 1)
+                self.assertEqual(summary["catalog_complete"], complete)
 
     def test_http_diagnostics_never_include_credentials_headers_bodies_or_query(self):
         secrets = (

@@ -147,6 +147,9 @@ class StudyTrace:
     @_guard()
     def outcome(self, stage, reason, result):
         with self.lock:
+            if self.result == "exception" and result == "exception":
+                self._record("exception_propagated", {"stage": stage})
+                return
             self.final_stage, self.reason, self.result = stage, reason, result
             self._record("task_outcome", {"stage": stage, "reason": reason, "result": result})
 
@@ -266,6 +269,10 @@ class StudyTrace:
                 "response": self.response(response if response is not None else data),
                 "decision": decision, "confirmed": confirmed,
             })
+
+    @_guard()
+    def progress_ref(self, token):
+        return token.get("submission") if isinstance(token, dict) else None
 
     @staticmethod
     def _path(local):

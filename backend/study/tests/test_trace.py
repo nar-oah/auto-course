@@ -666,20 +666,25 @@ class TraceTests(unittest.TestCase):
                     diagnostic.protect(f"private-ocr-{index}")
                 self.assertEqual(diagnostic.secrets.maxlen, 16)
                 self.assertEqual(len(diagnostic.secrets), 16)
-                self.assertEqual(diagnostic.credential_secrets, tuple(CREDENTIALS.values()))
+                self.assertEqual(len(diagnostic.credential_secrets), 2)
+                registry = repr((diagnostic.credential_secrets, diagnostic.secrets))
+                for secret in (*CREDENTIALS.values(), "private-ocr-0", "private-ocr-99"):
+                    self.assertNotIn(secret, registry)
                 self.assertEqual(diagnostic.response({"errorCode": CREDENTIALS["password"]})["errorCode"], "[redacted]")
                 self.assertEqual(diagnostic.response({"errorCode": "private-ocr-99"})["errorCode"], "[redacted]")
                 diagnostic.outcome("task", "completed", "completed")
 
     def test_numeric_ocr_echo_in_business_fields_is_masked(self):
-        log = self.only_log(self.run_task(
-            lambda request: httpx.Response(200, json={"status": False, "code": 628491, "errorCode": "628491"}),
-            ocr_result="628491",
-        ))
-        response = log["summary"]["last_study_request"]["response"]
-        self.assertEqual(response["code"], "[redacted]")
-        self.assertEqual(response["errorCode"], "[redacted]")
-        self.assertNotIn("628491", json.dumps(log))
+        for recognized, echoed in (("628491", 628491), ("001234", 1234)):
+            with self.subTest(recognized=recognized):
+                log = self.only_log(self.run_task(
+                    lambda request: httpx.Response(200, json={"status": False, "code": echoed, "errorCode": recognized}),
+                    ocr_result=recognized,
+                ))
+                response = log["summary"]["last_study_request"]["response"]
+                self.assertEqual(response["code"], "[redacted]")
+                self.assertEqual(response["errorCode"], "[redacted]")
+                self.assertNotIn(json.dumps(recognized), json.dumps(log))
 
     def test_video_prepare_and_progress_parse_exceptions_keep_the_precise_exit_stage(self):
         invalid = Video("Invalid", VIDEO.id, COURSE, float("nan"), 0, 0)

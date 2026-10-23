@@ -38,6 +38,7 @@ class CourseBot:
         self.sleep = sleep
         self.video_list = VideoList(client, config.finish_progress)
         self.trace = get_trace(client)
+        self.trace.protect(credentials.username, credentials.password)
         self._trace_login_phase = "initial"
         self._trace_video_id: str | None = None
         self._trace_progress_context: dict[str, object] = {}
@@ -127,7 +128,10 @@ class CourseBot:
                     "heartbeat_result", duration=self.trace.elapsed(started),
                     response=response_details,
                 )
-                if response_details.get("status") is False or response_details.get("offline") == 1:
+                if (
+                    response_details.get("status") is False
+                    or response_details.get("offline") == 1
+                ):
                     self.trace.anomaly("heartbeat_business_rejected", "heartbeat")
                 stop.wait(self.config.online_interval)
         except Exception as exc:
@@ -300,7 +304,11 @@ class CourseBot:
         self._trace_video_id = video.id
         self._trace_retry_cause = "initial"
         self._trace_progress_context = {}
-        self.trace.video_start(video.id, total_duration=video.total_duration, watched_duration=video.watched_duration, progress=video.progress, finish_time=finish_time)
+        self.trace.video_start(
+            video.id, total_duration=video.total_duration,
+            watched_duration=video.watched_duration,
+            progress=video.progress, finish_time=finish_time,
+        )
         if finish_time <= 1:
             self.trace.video_end("completed", "already_at_target")
             return True
@@ -309,7 +317,15 @@ class CourseBot:
             target=self._send_online_pings, args=(stop,), daemon=True
         )
         self.trace.event("heartbeat_thread_start_requested")
-        online_thread.start()
+        try:
+            online_thread.start()
+        except Exception as exc:
+            self.trace.anomaly(
+                "heartbeat_start_failed", "video", exception_type=type(exc).__name__
+            )
+            self.trace.outcome("video", "heartbeat_start_failed", "exception")
+            self.trace.video_end("exception", "heartbeat_start_failed")
+            raise
         video_result = ("exception", "unexpected_exit")
         try:
             study_id = 0
@@ -323,22 +339,37 @@ class CourseBot:
                 # Keep the scheduled wait without submitting past the target.
                 study_time = min(study_time + next_time, finish_time)
                 info = StudyInfo(video.id, study_id, study_time)
-                self._trace_progress_context = {"next_time": next_time, "failures": failures, "actual_wait": actual_wait}
+                self._trace_progress_context = {
+                    "next_time": next_time, "failures": failures,
+                    "actual_wait": actual_wait,
+                }
                 try:
                     next_id = self._submit_progress(info)
                 except StudyAborted:
                     video_result = self._trace_abort_result
-                    self.trace.event("progress_loop_decision", decision="exit_aborted", failures=failures, study_time=study_time, next_time=next_time, reason=video_result[1])
+                    self.trace.event(
+                        "progress_loop_decision", decision="exit_aborted",
+                        failures=failures, study_time=study_time, next_time=next_time,
+                        reason=video_result[1],
+                    )
                     return False
                 if next_id is None:
                     failures += 1
                 else:
                     study_id = next_id
-                self.trace.event("progress_loop_decision", decision="confirmed" if next_id is not None else "unconfirmed", failures=failures, study_time=study_time, next_time=next_time, study_id=self.trace.token("study", study_id))
+                self.trace.event(
+                    "progress_loop_decision",
+                    decision="confirmed" if next_id is not None else "unconfirmed",
+                    failures=failures, study_time=study_time, next_time=next_time,
+                    study_id=self.trace.token("study", study_id),
+                )
                 # Like the original loop, submit the boundary once, then exit.
                 # An unconfirmed final submission must also stop the domain.
                 if study_time >= finish_time:
-                    video_result = ("completed", "boundary_confirmed") if next_id is not None else ("progress_unconfirmed", "boundary_unconfirmed")
+                    video_result = (
+                        ("completed", "boundary_confirmed") if next_id is not None
+                        else ("progress_unconfirmed", "boundary_unconfirmed")
+                    )
                     self.trace.event("progress_loop_exit", reason=video_result[1], failures=failures)
                     if next_id is None:
                         self.trace.anomaly("boundary_unconfirmed", "progress")
@@ -350,21 +381,34 @@ class CourseBot:
                     next_time = min(
                         self.config.study_interval, finish_time - study_time
                     )
-                self.trace.event("progress_wait_scheduled", next_time=next_time, failures=failures, cause=self._trace_retry_cause)
+                self.trace.event(
+                    "progress_wait_scheduled", next_time=next_time,
+                    failures=failures, cause=self._trace_retry_cause,
+                )
             video_result = ("failure_budget_exhausted", "failure_budget_exhausted")
             self.trace.anomaly("failure_budget_exhausted", "progress", failures=failures)
             self.trace.outcome("progress", "failure_budget_exhausted", "failure_budget_exhausted")
             return False
         except Exception as exc:
             video_result = ("exception", "uncaught_exception")
-            self.trace.anomaly("uncaught_exception", "video", exception_type=type(exc).__name__)
+            self.trace.anomaly(
+                "uncaught_exception", "video", exception_type=type(exc).__name__
+            )
             self.trace.outcome("video", "uncaught_exception", "exception")
             raise
         finally:
             stop.set()
             self.trace.event("heartbeat_thread_stop_requested", reason=video_result[1])
             # Do not close/reuse the domain Client while a heartbeat is in flight.
-            online_thread.join()
+            try:
+                online_thread.join()
+            except Exception as exc:
+                self.trace.anomaly(
+                    "heartbeat_join_failed", "video", exception_type=type(exc).__name__
+                )
+                self.trace.outcome("video", "heartbeat_join_failed", "exception")
+                self.trace.video_end("exception", "heartbeat_join_failed")
+                raise
             self.trace.event("heartbeat_thread_joined", reason=video_result[1])
             self.trace.video_end(*video_result)
 
@@ -379,11 +423,20 @@ class CourseBot:
             for video in self.video_list.get_videos():
                 video_count += 1
                 if not self.update_study_progress(video):
-                    self.trace.event("study_run_return", reason="video_stopped", processed_videos=video_count)
+                    self.trace.event(
+                        "study_run_return", reason="video_stopped",
+                        processed_videos=video_count,
+                    )
                     return
-            self.trace.outcome("video_list", "traversal_completed" if video_count else "empty_video_list", "completed" if video_count else "empty_video_list")
+            self.trace.outcome(
+                "video_list",
+                "traversal_completed" if video_count else "empty_video_list",
+                "completed" if video_count else "empty_video_list",
+            )
             self.trace.event("study_run_end", processed_videos=video_count)
         except Exception as exc:
-            self.trace.anomaly("uncaught_exception", "study_run", exception_type=type(exc).__name__)
+            self.trace.anomaly(
+                "uncaught_exception", "study_run", exception_type=type(exc).__name__
+            )
             self.trace.outcome("study_run", "uncaught_exception", "exception")
             raise

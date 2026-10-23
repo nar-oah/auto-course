@@ -9,6 +9,7 @@ from typing import Any
 import httpx
 
 from .models import StudyInfo
+from .trace import get_trace
 
 
 RETRY_STATUSES = {429, 500, 502, 503, 504}
@@ -41,6 +42,8 @@ class StudyClient:
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.sleep = sleep
+        # Keep the task's collector available to the existing heartbeat thread.
+        self.trace = get_trace()
         self.client = httpx.Client(
             base_url=self.base_url,
             headers={
@@ -91,28 +94,81 @@ class StudyClient:
         # Progress submissions are retried by the study loop after its wait.
         for attempt in range(4 if retry else 1):
             if stop is not None and stop.is_set():
+                self.trace.event("http_skipped", reason="stop_set", attempt=attempt + 1)
                 return None
             response = None
+            request_error = None
+            token = self.trace.http_start(method, local)
             try:
                 response = self.client.request(method, local, **kwargs)
-            except httpx.RequestError:
-                pass
+            except httpx.RequestError as error:
+                request_error = error
+            except BaseException as error:
+                self.trace.http_end(token, error=error, disposition="exception_propagated")
+                raise
             else:
                 if not retry or response.status_code not in RETRY_STATUSES:
+                    self.trace.http_end(
+                        token,
+                        response=response,
+                        disposition="returned" if retry else "returned_without_retry",
+                    )
                     return response
             if not retry or attempt == 3:
+                self.trace.http_end(
+                    token,
+                    response=response,
+                    error=request_error,
+                    disposition="retries_exhausted" if retry else "failed_without_retry",
+                )
                 return None
             delay = self._retry_after(response)
+            retry_after = delay
             if delay is None:
                 delay = 2**attempt
             elif delay > MAX_RETRY_AFTER:
                 # End this request instead of retrying before the server permits it.
+                self.trace.http_end(
+                    token, response=response, error=request_error, disposition="retry_after_limit"
+                )
+                self.trace.event(
+                    "http_retry_after_limit", attempt=attempt + 1, retry_after=delay,
+                    maximum_wait=MAX_RETRY_AFTER,
+                )
                 return None
             delay = max(1.0, delay)
-            if stop is None:
-                self.sleep(delay)
-            elif stop.wait(delay):
-                return None
+            self.trace.http_end(
+                token, response=response, error=request_error, disposition="retry_scheduled"
+            )
+            reason = (
+                type(request_error).__name__
+                if request_error is not None
+                else f"http_{response.status_code}"
+            )
+            self.trace.event(
+                "http_retry_wait_start", attempt=attempt + 1, reason=reason,
+                planned_wait=delay, retry_after=retry_after,
+            )
+            wait_started = self.trace.clock()
+            try:
+                if stop is None:
+                    self.sleep(delay)
+                elif stop.wait(delay):
+                    self.trace.retry(
+                        attempt + 1, reason, delay,
+                        actual_wait=self.trace.elapsed(wait_started), interrupted=True,
+                    )
+                    return None
+            except BaseException as error:
+                self.trace.retry(
+                    attempt + 1, reason, delay,
+                    actual_wait=self.trace.elapsed(wait_started), interrupted=True,
+                )
+                self.trace.event("http_retry_wait_exception", error_type=type(error).__name__)
+                raise
+            self.trace.retry(
+                attempt + 1, reason, delay, actual_wait=self.trace.elapsed(wait_started)
+            )
         return None
 
     def get_captcha(self, local: str) -> httpx.Response | None:

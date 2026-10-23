@@ -62,6 +62,7 @@ class TraceTests(unittest.TestCase):
         login_status=True,
         heartbeat=False,
         credentials=CREDENTIALS,
+        ocr_result=CAPTCHA,
     ):
         requests = []
         study_waits = Mock()
@@ -96,7 +97,7 @@ class TraceTests(unittest.TestCase):
         def bot_factory(client, credentials):
             bot = CourseBot(
                 client, credentials, config=config,
-                ocr=Mock(classification=Mock(return_value=CAPTCHA)), sleep=study_waits,
+                ocr=Mock(classification=Mock(return_value=ocr_result)), sleep=study_waits,
             )
             bot.video_list.get_videos = Mock(return_value=iter(videos))
             if callable(heartbeat):
@@ -559,6 +560,143 @@ class TraceTests(unittest.TestCase):
         limit = next(event for event in log["events"] if event["event"] == "http_retry_after_limit")
         self.assertEqual(limit["retry_after"], 3600)
         self.assertFalse(ends[0]["response"]["status"])
+
+    def test_concurrent_login_and_heartbeat_retries_keep_their_call_identity(self):
+        first_attempts = threading.Barrier(2)
+        attempts = {"/user/login": 0, "/user/online": 0}
+        errors = []
+        results = []
+
+        def handler(request):
+            path = request.url.path
+            attempts[path] += 1
+            if attempts[path] == 1:
+                first_attempts.wait(timeout=2)
+                return httpx.Response(503 if path == "/user/login" else 429)
+            return httpx.Response(200, json={"status": True})
+
+        with captured_trace() as records:
+            with trace.task_trace(DOMAIN, TASK_ID) as diagnostic:
+                with StudyClient(
+                    "https://" + DOMAIN, transport=httpx.MockTransport(handler), sleep=Mock(),
+                ) as client:
+                    def request(kind):
+                        try:
+                            with diagnostic.context(request_kind=kind):
+                                result = client.post_online() if kind == "heartbeat" else client.post_login(
+                                    CREDENTIALS["username"], CREDENTIALS["password"], CAPTCHA,
+                                )
+                                results.append(result.status_code)
+                        except Exception as error:
+                            errors.append(error)
+
+                    workers = [threading.Thread(target=request, args=(kind,)) for kind in ("login", "heartbeat")]
+                    for worker in workers:
+                        worker.start()
+                    for worker in workers:
+                        worker.join(timeout=3)
+                        self.assertFalse(worker.is_alive())
+                diagnostic.outcome("task", "completed", "completed")
+        self.assertEqual(errors, [])
+        self.assertEqual(results, [200, 200])
+        log = payloads(records)[0]
+        starts = [event for event in log["events"] if event["event"] == "http_start"]
+        self.assertEqual(len({event["request"] for event in starts}), 4)
+        self.assertEqual(len({event["call_id"] for event in starts}), 2)
+        for path in attempts:
+            path_events = [event for event in starts if event["path"] == path]
+            self.assertEqual([event["attempt"] for event in path_events], [1, 2])
+            self.assertEqual(len({event["call_id"] for event in path_events}), 1)
+            retry = next(event for event in log["events"] if event["event"] == "http_retry" and event["path"] == path)
+            self.assertEqual(retry["call_id"], path_events[0]["call_id"])
+            self.assertEqual(retry["request"], path_events[0]["request"])
+            self.assertEqual(retry["attempt"], 1)
+            self.assertEqual(retry["retry"], 1)
+        self.assertEqual(log["summary"]["http"]["calls"], 2)
+
+    def test_first_failure_and_last_study_response_survive_buffer_eviction(self):
+        with captured_trace() as records:
+            with trace.task_trace(DOMAIN, TASK_ID) as diagnostic:
+                diagnostic.video_start(VIDEO.id, 100, 50, .5, 46)
+                first = diagnostic.progress_start(StudyInfo(VIDEO.id, 0, 1))
+                request = diagnostic.http_start("POST", "/user/node/study")
+                rejected = httpx.Response(200, json={"status": False, "errorCode": 409})
+                diagnostic.http_end(request, rejected)
+                diagnostic.progress_end(first, rejected, decision="exit_business_rejected", confirmed=False)
+                diagnostic.anomaly("business_rejected", "progress")
+                # A later response and many events must not replace evidence at
+                # the first anomaly or evict the final study response snapshot.
+                second = diagnostic.progress_start(StudyInfo(VIDEO.id, 0, 31))
+                request = diagnostic.http_start("POST", "/user/node/study")
+                accepted = httpx.Response(200, json={"status": True, "studyId": 7})
+                diagnostic.http_end(request, accepted)
+                diagnostic.progress_end(second, accepted, decision="confirmed", confirmed=True)
+                for index in range(400):
+                    diagnostic.event("later_heartbeat_event", index=index)
+                diagnostic.outcome("task", "completed", "completed")
+        log = payloads(records)[0]
+        self.assertFalse(any(event["event"] == "progress_end" for event in log["events"]))
+        first = log["summary"]["first_anomaly"]
+        self.assertFalse(first["last_study_request"]["response"]["status"])
+        self.assertEqual(first["last_progress"]["decision"], "exit_business_rejected")
+        self.assertTrue(log["summary"]["last_study_request"]["response"]["status"])
+        self.assertEqual(log["summary"]["last_progress"]["decision"], "confirmed")
+        self.assertEqual(log["summary"]["last_study_request"]["final_path"], "/user/node/study")
+
+    def test_bare_mock_response_keeps_http_and_redirect_diagnostics(self):
+        with captured_trace() as records:
+            with trace.task_trace(DOMAIN, TASK_ID) as diagnostic:
+                request = diagnostic.http_start("GET", "/user/")
+                diagnostic.http_end(request, httpx.Response(
+                    200, json={"status": False}, history=[httpx.Response(302)],
+                ))
+                diagnostic.anomaly("dump_for_test", "http")
+                diagnostic.outcome("task", "completed", "completed")
+        event = next(event for event in payloads(records)[0]["events"] if event["event"] == "http_end")
+        self.assertEqual(event["http_status"], 200)
+        self.assertEqual(event["final_path"], "/user/")
+        self.assertEqual(event["redirect_paths"], ["/[redacted]"])
+        self.assertEqual(event["redirect_statuses"], [302])
+
+    def test_recent_ocr_secret_storage_is_bounded_and_credentials_remain_protected(self):
+        with captured_trace():
+            with trace.task_trace(DOMAIN, TASK_ID) as diagnostic:
+                diagnostic.protect(*CREDENTIALS.values())
+                for index in range(100):
+                    diagnostic.protect(f"private-ocr-{index}")
+                self.assertEqual(diagnostic.secrets.maxlen, 16)
+                self.assertEqual(len(diagnostic.secrets), 16)
+                self.assertEqual(diagnostic.credential_secrets, tuple(CREDENTIALS.values()))
+                self.assertEqual(diagnostic.response({"errorCode": CREDENTIALS["password"]})["errorCode"], "[redacted]")
+                self.assertEqual(diagnostic.response({"errorCode": "private-ocr-99"})["errorCode"], "[redacted]")
+                diagnostic.outcome("task", "completed", "completed")
+
+    def test_numeric_ocr_echo_in_business_fields_is_masked(self):
+        log = self.only_log(self.run_task(
+            lambda request: httpx.Response(200, json={"status": False, "code": 628491, "errorCode": "628491"}),
+            ocr_result="628491",
+        ))
+        response = log["summary"]["last_study_request"]["response"]
+        self.assertEqual(response["code"], "[redacted]")
+        self.assertEqual(response["errorCode"], "[redacted]")
+        self.assertNotIn("628491", json.dumps(log))
+
+    def test_video_prepare_and_progress_parse_exceptions_keep_the_precise_exit_stage(self):
+        invalid = Video("Invalid", VIDEO.id, COURSE, float("nan"), 0, 0)
+        run = self.run_task(lambda request: self.fail("No study request expected"), videos=(invalid,))
+        self.assertIsInstance(run["error"], ValueError)
+        summary = run["logs"][0]["summary"]
+        self.assertEqual(summary["final_stage"], "video_prepare")
+        self.assertEqual(summary["reason"], "finish_time_exception")
+        self.assertEqual(summary["counts"]["video_end"], 1)
+        with patch.object(CourseBot, "_progress_data", side_effect=TypeError("private parse error")):
+            run = self.run_task(lambda request: httpx.Response(200, json={"status": True, "studyId": 7}))
+        self.assertIsInstance(run["error"], TypeError)
+        summary = run["logs"][0]["summary"]
+        self.assertEqual(summary["final_stage"], "progress")
+        self.assertEqual(summary["reason"], "progress_parse_exception")
+        self.assertEqual(summary["last_progress"]["decision"], "exception")
+        self.assertEqual(summary["last_study_request"]["response"]["status"], True)
 
 
 if __name__ == "__main__":

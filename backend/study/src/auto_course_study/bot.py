@@ -46,11 +46,17 @@ class CourseBot:
 
     def recognize_captcha(self, path: str) -> str | None:
         started = self.trace.clock()
-        self.trace.event("captcha_start", purpose="progress" if path == "/service/code/aa" else "login")
+        self.trace.event(
+            "captcha_start", purpose="progress" if path == "/service/code/aa" else "login"
+        )
         try:
             response = self.client.get_captcha(f"{path}?r={time.time()}")
             if response is None or not response.is_success:
-                self.trace.event("captcha_result", acquired=False, ocr_result=False, duration=self.trace.elapsed(started), response=self.trace.response(response))
+                self.trace.event(
+                    "captcha_result", acquired=False, ocr_result=False,
+                    duration=self.trace.elapsed(started),
+                    response=self.trace.response(response),
+                )
                 return None
             if self.ocr is None:
                 # Loading ONNX/OCR is only needed inside the domain worker.
@@ -58,10 +64,17 @@ class CourseBot:
 
                 self.ocr = ddddocr.DdddOcr(show_ad=False)
             code = self.ocr.classification(response.content)
-            self.trace.event("captcha_result", acquired=True, ocr_result=isinstance(code, str) and bool(code), duration=self.trace.elapsed(started))
+            self.trace.event(
+                "captcha_result", acquired=True,
+                ocr_result=isinstance(code, str) and bool(code),
+                duration=self.trace.elapsed(started),
+            )
             return code if isinstance(code, str) else None
         except Exception as exc:
-            self.trace.event("captcha_exception", exception_type=type(exc).__name__, duration=self.trace.elapsed(started))
+            self.trace.event(
+                "captcha_exception", exception_type=type(exc).__name__,
+                duration=self.trace.elapsed(started),
+            )
             raise
 
     def login(self) -> bool:
@@ -69,19 +82,31 @@ class CourseBot:
         with self.trace.context(login_phase=self._trace_login_phase, request_kind="login"):
             code = self.recognize_captcha("/service/code")
             if not code:
-                self.trace.event("login_result", login_phase=self._trace_login_phase, accepted=False, reason="captcha_unavailable")
+                self.trace.event(
+                    "login_result", login_phase=self._trace_login_phase,
+                    accepted=False, reason="captcha_unavailable",
+                )
                 return False
             response = self.client.post_login(
                 self.credentials.username, self.credentials.password, code
             )
             if response is None or not response.is_success:
-                self.trace.event("login_result", login_phase=self._trace_login_phase, accepted=False, reason="http_unconfirmed", response=self.trace.response(response))
+                self.trace.event(
+                    "login_result", login_phase=self._trace_login_phase,
+                    accepted=False, reason="http_unconfirmed",
+                    response=self.trace.response(response),
+                )
                 return False
             status = json_object(response).get("status")
             # Preserve the old login's integer success flag without accepting
             # arbitrary truthy strings, numbers or containers as authentication.
             accepted = isinstance(status, (bool, int)) and status == 1
-            self.trace.event("login_result", login_phase=self._trace_login_phase, accepted=accepted, reason="confirmed" if accepted else "business_unconfirmed", response=self.trace.response(response))
+            self.trace.event(
+                "login_result", login_phase=self._trace_login_phase,
+                accepted=accepted,
+                reason="confirmed" if accepted else "business_unconfirmed",
+                response=self.trace.response(response),
+            )
             return accepted
 
     def _send_online_pings(self, stop: threading.Event) -> None:
@@ -91,13 +116,21 @@ class CourseBot:
             while not stop.is_set():
                 started = self.trace.clock()
                 self.trace.event("heartbeat_start")
-                with self.trace.context(request_kind="heartbeat", heartbeat_video=self.trace.token("video", self._trace_video_id)):
+                with self.trace.context(
+                    request_kind="heartbeat",
+                    heartbeat_video=self.trace.token("video", self._trace_video_id),
+                ):
                     response = self.client.post_online(stop=stop)
-                self.trace.event("heartbeat_result", duration=self.trace.elapsed(started), response=self.trace.response(response))
+                self.trace.event(
+                    "heartbeat_result", duration=self.trace.elapsed(started),
+                    response=self.trace.response(response),
+                )
                 stop.wait(self.config.online_interval)
         except Exception as exc:
             exit_reason = "exception"
-            self.trace.anomaly("heartbeat_exception", "heartbeat", exception_type=type(exc).__name__)
+            self.trace.anomaly(
+                "heartbeat_exception", "heartbeat", exception_type=type(exc).__name__
+            )
             raise
         finally:
             self.trace.event("heartbeat_thread_exit", reason=exit_reason)

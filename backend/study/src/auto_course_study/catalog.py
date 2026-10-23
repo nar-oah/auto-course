@@ -43,8 +43,10 @@ class VideoList:
             self._catalog_issue("course_page_http_error", page=page)
         if not response.text.strip():
             self._catalog_issue("course_page_empty", page=page)
-            return
-        items = BeautifulSoup(response.text, "html.parser").find_all("div", class_="name")
+
+    @_diagnostic
+    def _trace_course_structure(self, soup, page: int) -> None:
+        items = soup.find_all("div", class_="name")
         valid = 0
         for item in items:
             link = item.find("a")
@@ -155,8 +157,10 @@ class VideoList:
             self._catalog_issue("course_pagination_http_error")
 
     @staticmethod
-    def _handle_courses(html: str) -> Iterator[Course]:
+    def _handle_courses(html: str, *, inspect=None) -> Iterator[Course]:
         soup = BeautifulSoup(html, "html.parser")
+        if inspect is not None:
+            inspect(soup)
         for item in soup.find_all("div", class_="name"):
             link = item.find("a")
             if link is None:
@@ -191,7 +195,9 @@ class VideoList:
                 self._catalog_issue("course_page_unavailable", page=page)
                 continue
             self._trace_course_page(response, page)
-            for course in self._handle_courses(response.text):
+            for course in self._handle_courses(
+                response.text, inspect=lambda soup: self._trace_course_structure(soup, page),
+            ):
                 self.trace.event("course_discovered", course=self.trace.token("course", course.id))
                 for item in self._get_video_items(course):
                     try:

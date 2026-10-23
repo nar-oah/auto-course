@@ -86,7 +86,9 @@ class VideoList:
         if failed:
             self._catalog_issue("video_response_business_error", **fields, response=details)
         elif data.get("status") is not True and data.get("success") is not True and any(
-            data.get(key) not in (None, "", False, 0) for key in ("message", "msg")
+            data.get(key) not in (None, "", False, 0) for key in (
+                "message", "msg", "error_message", "errorMessage", "errorMsg", "errmsg", "detail",
+            )
         ):
             self._catalog_issue("video_response_ambiguous_message", **fields, response=details)
         if "list" not in data:
@@ -106,7 +108,9 @@ class VideoList:
                 value = page_info["pageCount"]
                 try:
                     count = int(value)
-                    valid = not isinstance(value, bool) and count >= 1 and (
+                    valid = not isinstance(value, bool) and (
+                        count >= 1 or (count == 0 and data.get("list") == [])
+                    ) and (
                         not isinstance(value, float) or value == count
                     )
                 except (TypeError, ValueError, OverflowError):

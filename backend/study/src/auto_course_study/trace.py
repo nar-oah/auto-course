@@ -105,11 +105,23 @@ class StudyTrace:
     @_guard()
     def protect(self, *values):
         with self.lock:
-            values = tuple(v for v in values if isinstance(v, str) and v)
-            if len(values) > 1:
-                self.credential_secrets = values[:2]
+            protected = []
+            for value in values:
+                if not isinstance(value, str) or not value:
+                    continue
+                fingerprints = [(len(value), self.token("secret", value))]
+                if value.isdecimal():
+                    try:
+                        normalized = str(int(value))
+                    except ValueError:
+                        pass
+                    else:
+                        fingerprints.append((len(normalized), self.token("secret", normalized)))
+                protected.append(tuple(fingerprints))
+            if len(protected) > 1:
+                self.credential_secrets = tuple(protected[:2])
             else:
-                self.secrets.extend(values)
+                self.secrets.extend(protected)
 
     def _clean(self, value, depth=0):
         if depth > 6:
@@ -220,11 +232,17 @@ class StudyTrace:
 
     def _business_value(self, value):
         with self.lock:
-            secrets = self.credential_secrets + tuple(self.secrets)
-        if isinstance(value, (int, str)) and not isinstance(value, bool) and any(
-            secret in str(value) for secret in secrets
-        ):
-            return "[redacted]"
+            fingerprints = {item for protected in self.credential_secrets + tuple(self.secrets) for item in protected}
+        if isinstance(value, (int, float, str)) and not isinstance(value, bool):
+            rendered = str(value)
+            if len(rendered) > 32:
+                return {"type": type(value).__name__, "ref": self.token("business", value)}
+            # Only fingerprints/lengths are retained, never the credentials or OCR
+            # text itself. Short server values can also echo part of a secret.
+            for length in {item[0] for item in fingerprints if item[0] <= len(rendered)}:
+                for start in range(len(rendered) - length + 1):
+                    if (length, self.token("secret", rendered[start:start + length])) in fingerprints:
+                        return "[redacted]"
         if value is None or isinstance(value, (bool, int)):
             return self._clean(value)
         if isinstance(value, float):

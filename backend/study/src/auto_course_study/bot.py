@@ -196,6 +196,15 @@ class CourseBot:
             self.trace.anomaly("http_rejected", "progress")
             self.trace.outcome("progress", "http_rejected", "progress_rejected")
             raise
+        except Exception as exc:
+            self.trace.progress_end(
+                submission, response=response, decision="exception", confirmed=False
+            )
+            self.trace.anomaly(
+                "progress_parse_exception", "progress", exception_type=type(exc).__name__
+            )
+            self.trace.outcome("progress", "progress_parse_exception", "exception")
+            raise
         if data.get("status") is not True and data.get("need_code", 0) == 1:
             self.trace.progress_end(
                 submission, response=response, data=data,
@@ -241,8 +250,34 @@ class CourseBot:
                 self.trace.anomaly("captcha_http_rejected", "progress_captcha")
                 self.trace.outcome("progress_captcha", "captcha_http_rejected", "progress_rejected")
                 raise
+            except Exception as exc:
+                self.trace.progress_end(
+                    submission, response=response, decision="exception", confirmed=False
+                )
+                self.trace.anomaly(
+                    "progress_parse_exception", "progress_captcha",
+                    exception_type=type(exc).__name__,
+                )
+                self.trace.outcome(
+                    "progress_captcha", "progress_parse_exception", "exception"
+                )
+                raise
         if data.get("status") is True:
-            study_id = self._study_id(data)
+            try:
+                study_id = self._study_id(data)
+            except Exception as exc:
+                self.trace.progress_end(
+                    submission, response=response, data=data,
+                    decision="exception", confirmed=False,
+                )
+                self.trace.anomaly(
+                    "study_id_exception", "progress_confirmation",
+                    exception_type=type(exc).__name__,
+                )
+                self.trace.outcome(
+                    "progress_confirmation", "study_id_exception", "exception"
+                )
+                raise
             self.trace.progress_end(
                 submission, response=response, data=data,
                 decision="confirmed" if study_id is not None else "retry_invalid_study_id",
@@ -298,9 +333,23 @@ class CourseBot:
         return None
 
     def update_study_progress(self, video: Video) -> bool:
-        finish_time = math.ceil(
-            (video.total_duration - video.watched_duration) * self.config.finish_progress
-        )
+        try:
+            finish_time = math.ceil(
+                (video.total_duration - video.watched_duration) * self.config.finish_progress
+            )
+        except Exception as exc:
+            self.trace.video_start(
+                video.id, total_duration=video.total_duration,
+                watched_duration=video.watched_duration,
+                progress=video.progress, finish_time=None,
+            )
+            self.trace.anomaly(
+                "finish_time_exception", "video_prepare",
+                exception_type=type(exc).__name__,
+            )
+            self.trace.outcome("video_prepare", "finish_time_exception", "exception")
+            self.trace.video_end("exception", "finish_time_exception")
+            raise
         self._trace_video_id = video.id
         self._trace_retry_cause = "initial"
         self._trace_progress_context = {}

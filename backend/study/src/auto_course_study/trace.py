@@ -204,7 +204,9 @@ class StudyTrace:
                 "zero": valid and str(value).strip("0") == ""}
 
     def _business_value(self, value):
-        if isinstance(value, (int, str)) and not isinstance(value, bool) and str(value) in self.secrets:
+        if isinstance(value, (int, str)) and not isinstance(value, bool) and any(
+            secret in str(value) for secret in tuple(self.secrets)
+        ):
             return "[redacted]"
         if value is None or isinstance(value, (bool, int)):
             return self._clean(value)

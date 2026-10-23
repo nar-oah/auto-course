@@ -176,6 +176,54 @@ class TraceTests(unittest.TestCase):
                 self.assertIsNone(run["error"])
                 self.assertEqual(run["logs"], [])
 
+    def test_httpx_info_filter_tracks_environment_and_preserves_logger_configuration(self):
+        httpx_logger = logging.getLogger("httpx")
+        records = []
+        handler = logging.Handler()
+        handler.emit = records.append
+        original_level = httpx_logger.level
+        httpx_logger.setLevel(logging.DEBUG)
+        httpx_logger.addHandler(handler)
+        configuration = (
+            httpx_logger.level, tuple(httpx_logger.handlers), tuple(httpx_logger.filters),
+            httpx_logger.propagate, httpx_logger.disabled,
+        )
+        try:
+            for enabled in (None, "0", "true", "1", None):
+                with self.subTest(enabled=enabled):
+                    records.clear()
+                    errors = []
+                    with captured_trace(enabled):
+                        with StudyClient(
+                            "https://" + DOMAIN,
+                            transport=httpx.MockTransport(lambda request: httpx.Response(200)),
+                        ) as client:
+                            def request_from_heartbeat_thread():
+                                try:
+                                    client.get_page()
+                                except Exception as error:
+                                    errors.append(error)
+
+                            worker = threading.Thread(target=request_from_heartbeat_thread)
+                            worker.start()
+                            worker.join(timeout=2)
+                            self.assertFalse(worker.is_alive())
+                        httpx_logger.debug("diagnostic debug control")
+                        httpx_logger.warning("diagnostic warning control")
+                    self.assertEqual(errors, [])
+                    info = [record for record in records if record.levelno == logging.INFO]
+                    self.assertEqual(len(info), 0 if enabled == "1" else 1)
+                    if info:
+                        self.assertTrue(info[0].getMessage().startswith("HTTP Request: GET "))
+                    self.assertEqual([record.levelno for record in records if record.levelno != logging.INFO], [logging.DEBUG, logging.WARNING])
+                    self.assertEqual(configuration, (
+                        httpx_logger.level, tuple(httpx_logger.handlers), tuple(httpx_logger.filters),
+                        httpx_logger.propagate, httpx_logger.disabled,
+                    ))
+        finally:
+            httpx_logger.removeHandler(handler)
+            httpx_logger.setLevel(original_level)
+
     def test_normal_completion_emits_one_summary_without_request_events(self):
         run = self.run_task(
             lambda request: httpx.Response(200, json={"status": True, "studyId": 7}),
@@ -607,6 +655,42 @@ class TraceTests(unittest.TestCase):
             with self.subTest(secret=secret):
                 self.assertNotIn(secret, serialized)
         self.assertIn("/[redacted]", serialized)
+
+    def test_message_fields_always_record_only_presence_type_and_per_task_fingerprint(self):
+        names = ("message", "msg", "error", "error_message", "errorMessage", "detail", "errmsg", "errorMsg")
+        values = (
+            "success", "8937625184", 883922773, CREDENTIALS["password"],
+            None, False, ["private message list"], {"nested": "private message object"},
+        )
+        first = trace.StudyTrace(DOMAIN, TASK_ID)
+        second = trace.StudyTrace(DOMAIN, TASK_ID)
+        first.protect(*CREDENTIALS.values())
+        second.protect(*CREDENTIALS.values())
+        absent = first.response({})
+        for name in names:
+            self.assertEqual(absent[name], {"present": False})
+            for value in values:
+                with self.subTest(name=name, value=value):
+                    descriptor = first.response({name: value})[name]
+                    self.assertEqual(set(descriptor), {"present", "type", "ref"})
+                    self.assertTrue(descriptor["present"])
+                    self.assertEqual(descriptor["type"], type(value).__name__)
+                    self.assertRegex(descriptor["ref"], r"^message:[0-9a-f]{16}$")
+                    self.assertEqual(descriptor, first.response({name: value})[name])
+                    self.assertNotEqual(descriptor["ref"], second.response({name: value})[name]["ref"])
+                    if type(value) in (str, int):
+                        self.assertNotIn(str(value), json.dumps(descriptor))
+
+        body = {name: f"private response {name} " + CREDENTIALS["password"] for name in names}
+        log = self.only_log(self.run_task(
+            lambda request: httpx.Response(200, json={"status": False, **body}),
+        ))
+        serialized = json.dumps(log)
+        self.assertNotIn(CREDENTIALS["password"], serialized)
+        response = log["summary"]["last_progress"]["response"]
+        for name in names:
+            self.assertEqual(set(response[name]), {"present", "type", "ref"})
+            self.assertNotIn(body[name], serialized)
 
     def test_http_retries_redirects_and_json_failures_are_retained(self):
         seen = []

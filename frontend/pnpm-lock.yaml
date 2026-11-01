@@ -211,6 +211,10 @@ importers:
         version: 8.3.5(jiti@2.7.0)
 
   desktop:
+    dependencies:
+      '@tauri-apps/plugin-http':
+        specifier: ^2
+        version: 2.8.0
     devDependencies:
       '@auto-course/app':
         specifier: workspace:*
@@ -995,6 +999,9 @@ packages:
       svelte: ^5.46.4
       vite: ^8.0.0-beta.7 || ^8.0.0
 
+  '@tauri-apps/api@2.12.1':
+    resolution: {integrity: sha512-DeyFHa3wynpyoqTDikDEDGTJIq4LQ5USfolQGRmGIWT6JMADyxZBTDa5cAdT3tDg73rUXufPaCwN7aXBos4OnQ==}
+
   '@tauri-apps/cli-darwin-arm64@2.12.4':
     resolution: {integrity: sha512-OxqKSckIkoJ6vX2AjifIJpTasFC0Hbdoo7gEiCmAjauABO3U8m2MRsLWe+QTiBwDx1mIrvgA+rvI7tvDnbnHVg==}
     engines: {node: '>= 10'}
@@ -1070,6 +1077,9 @@ packages:
     resolution: {integrity: sha512-JI9bHfudSRJikGOrjbXEm6RjzzvmKuLc+JixB1NE8hNzQkNlCCIC3pTES3uypkR9lxHrsbxzcnSwhI2IxBQphw==}
     engines: {node: '>= 10'}
     hasBin: true
+
+  '@tauri-apps/plugin-http@2.8.0':
+    resolution: {integrity: sha512-cPvZvfUSaBkqGxef/dgbh/iEl6T3jQfSJyypi9OdcWr1VcuTt4ZRlk9DLAHEHF2q2NML+0UOkjyXRPNo6Cky6g==}
 
   '@types/estree@1.0.10':
     resolution: {integrity: sha512-lTyOMnOcmRBzdCv6/4zUZCrEhV0xrqQiUZBZtVcbmLHBXKLnN8q89v/wKRF/Q0HbwVsqbIG3o5HDoFl9sduM+g==}
@@ -2307,6 +2317,8 @@ snapshots:
       vite: 8.3.5(jiti@2.7.0)
       vitefu: 1.1.3(vite@8.3.5(jiti@2.7.0))
 
+  '@tauri-apps/api@2.12.1': {}
+
   '@tauri-apps/cli-darwin-arm64@2.12.4':
     optional: true
 
@@ -2353,6 +2365,10 @@ snapshots:
       '@tauri-apps/cli-win32-arm64-msvc': 2.12.4
       '@tauri-apps/cli-win32-ia32-msvc': 2.12.4
       '@tauri-apps/cli-win32-x64-msvc': 2.12.4
+
+  '@tauri-apps/plugin-http@2.8.0':
+    dependencies:
+      '@tauri-apps/api': 2.12.1
 
   '@types/estree@1.0.10': {}
 

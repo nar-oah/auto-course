@@ -2,4 +2,4 @@
 	import App from '#lib/App.svelte';
 </script>
 
-<App />
+<App fetch={globalThis.fetch} />

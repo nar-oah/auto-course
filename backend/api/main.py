@@ -1,10 +1,23 @@
 import os
 
 from auto_course_contracts import Credentials
+from celery import Celery
 from fastapi import FastAPI, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 
-from .broker import app as celery_app
+
+celery_app = Celery(
+    "auto_course_api",
+    broker=os.getenv("CELERY_BROKER_URL", "redis://redis:6379/0"),
+)
+celery_app.conf.update(
+    task_default_queue="study",
+    task_serializer="json",
+    accept_content=["json"],
+    task_ignore_result=True,
+    task_store_errors_even_if_ignored=False,
+    result_backend=None,
+)
 
 app = FastAPI(title="Auto Course", root_path="/auto-course")
 app.add_middleware(

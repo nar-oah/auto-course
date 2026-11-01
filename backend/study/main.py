@@ -9,24 +9,33 @@ from urls import get_urls
 
 celery_app = Celery(
     "study",
-    broker=os.environ.get("REDIS_URL", "redis://redis:6379/0"),
+    broker=os.getenv("CELERY_BROKER_URL", "redis://redis:6379/0"),
 )
 celery_app.conf.update(
     task_default_queue="study",
     task_routes={"study.*": {"queue": "study"}},
+    task_serializer="json",
+    accept_content=["json"],
+    task_ignore_result=True,
+    task_store_errors_even_if_ignored=False,
+    result_backend=None,
 )
 
 
 @celery_app.task(name="study.start", ignore_result=True)
 def start(credentials: dict[str, str]) -> None:
     for domain in get_urls():
-        run_bot.apply_async(args=[domain, credentials], queue="study")
+        run_domain.apply_async(
+            args=[domain, credentials],
+            queue="study",
+            argsrepr=f"({domain!r}, <credentials>)",
+        )
 
 
-@celery_app.task(name="study.run_bot", bind=True, ignore_result=True)
-def run_bot(self, domain: str, credentials: dict[str, str]) -> None:
+@celery_app.task(name="study.run_domain", ignore_result=True)
+def run_domain(domain: str, credentials: dict[str, str]) -> None:
     user = User(**credentials)
-    task_id = self.request.id
+    task_id = run_domain.request.id
     logger = logging.getLogger(f"{task_id}_{domain}")
     logger.setLevel(logging.INFO)
 

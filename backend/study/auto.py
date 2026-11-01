@@ -119,4 +119,3 @@ class CourseBot:
             self.logger.info(f"[{i + 1}]《{video.name}》({video.id})")
             self.update_study_progress(video)
         self.logger.info("=" * 10 + " 所有任务已处理完毕 " + "=" * 10)
-

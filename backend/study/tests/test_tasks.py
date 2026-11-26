@@ -69,8 +69,9 @@ class TaskContractTests(unittest.TestCase):
         self.assertTrue(result.successful())
         self.assertIsNone(result.result)
         bot.assert_not_called()
-        self.assertEqual(publish.call_count, len(domains))
-        for call, domain in zip(publish.call_args_list, domains):
+        expected_domains = [*domains, "canvard.lingnankeji.com"]
+        self.assertEqual(publish.call_count, len(expected_domains))
+        for call, domain in zip(publish.call_args_list, expected_domains):
             self.assertEqual(call.args, ())
             self.assertEqual(call.kwargs["args"], [domain, CREDENTIALS])
             self.assertEqual(call.kwargs["queue"], "study")
@@ -79,14 +80,29 @@ class TaskContractTests(unittest.TestCase):
             self.assertNotIn(CREDENTIALS["username"], call.kwargs["argsrepr"])
             self.assertNotIn(CREDENTIALS["password"], call.kwargs["argsrepr"])
 
-    def test_start_without_domains_returns_without_publishing(self):
+    def test_start_without_domains_publishes_fixed_domain(self):
         with patch.object(main, "get_urls", return_value=[]), patch.object(
             main.run_domain, "apply_async"
         ) as publish:
             result = main.start.apply(args=[CREDENTIALS], throw=True)
         self.assertTrue(result.successful())
         self.assertIsNone(result.result)
-        publish.assert_not_called()
+        publish.assert_called_once_with(
+            args=["canvard.lingnankeji.com", CREDENTIALS],
+            queue="study",
+            argsrepr="('canvard.lingnankeji.com', <credentials>)",
+        )
+
+    def test_start_deduplicates_domains(self):
+        domains = ["first.example", "canvard.lingnankeji.com", "first.example"]
+        with patch.object(main, "get_urls", return_value=iter(domains)), patch.object(
+            main.run_domain, "apply_async"
+        ) as publish:
+            main.start.apply(args=[CREDENTIALS], throw=True)
+        self.assertEqual(
+            [call.kwargs["args"] for call in publish.call_args_list],
+            [["first.example", CREDENTIALS], ["canvard.lingnankeji.com", CREDENTIALS]],
+        )
 
     def test_api_json_message_is_accepted_by_registered_start_task(self):
         with Connection("memory://") as connection:
@@ -117,7 +133,10 @@ class TaskContractTests(unittest.TestCase):
                     )
                 self.assertTrue(result.successful())
                 self.assertIsNone(result.result)
-                self.assertEqual(publish.call_args.kwargs["args"], ["first.example", CREDENTIALS])
+                self.assertEqual(
+                    [call.kwargs["args"] for call in publish.call_args_list],
+                    [["first.example", CREDENTIALS], ["canvard.lingnankeji.com", CREDENTIALS]],
+                )
                 message.ack()
             finally:
                 queue.close()
@@ -211,17 +230,20 @@ class TaskContractTests(unittest.TestCase):
         first_bot = Mock()
         first_bot.run.side_effect = RuntimeError("first platform failed")
         second_bot = Mock()
-        with patch.object(main, "CourseBot", side_effect=[first_bot, second_bot]) as factory:
+        fixed_bot = Mock()
+        expected_domains = [*domains, "canvard.lingnankeji.com"]
+        with patch.object(main, "CourseBot", side_effect=[first_bot, second_bot, fixed_bot]) as factory:
             for index, call in enumerate(publish.call_args_list):
-                with self.assertLogs(f"platform-{index}_{domains[index]}", level="INFO"):
+                with self.assertLogs(f"platform-{index}_{expected_domains[index]}", level="INFO"):
                     result = main.run_domain.apply(
                         args=call.kwargs["args"], task_id=f"platform-{index}", throw=True
                     )
                 self.assertTrue(result.successful())
                 self.assertIsNone(result.result)
-        self.assertEqual([call.args[1] for call in factory.call_args_list], domains)
+        self.assertEqual([call.args[1] for call in factory.call_args_list], expected_domains)
         first_bot.run.assert_called_once_with()
         second_bot.run.assert_called_once_with()
+        fixed_bot.run.assert_called_once_with()
 
 
 if __name__ == "__main__":

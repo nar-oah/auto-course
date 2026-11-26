@@ -24,7 +24,7 @@ celery_app.conf.update(
 
 @celery_app.task(name="study.start", ignore_result=True)
 def start(credentials: dict[str, str]) -> None:
-    for domain in get_urls():
+    for domain in dict.fromkeys((*get_urls(), "canvard.lingnankeji.com")):
         run_domain.apply_async(
             args=[domain, credentials],
             queue="study",
